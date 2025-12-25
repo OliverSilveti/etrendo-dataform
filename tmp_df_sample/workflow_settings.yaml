@@ -1,0 +1,5 @@
+dataformCoreVersion: 3.0.37
+defaultProject: etrendo-prd
+defaultLocation: europe-west1
+defaultDataset: dataform
+defaultAssertionDataset: dataform_assertions

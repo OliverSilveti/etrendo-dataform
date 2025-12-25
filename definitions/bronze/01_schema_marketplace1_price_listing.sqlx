@@ -1,3 +1,8 @@
+config {
+  type: "operations",
+  tags: ["bronze", "marketplace1"]
+}
+
 CREATE OR REPLACE EXTERNAL TABLE `etrendo-prd.amazon_bronze.amazon_price_listing_coffee_machines` (
   asin STRING,
   title STRING,

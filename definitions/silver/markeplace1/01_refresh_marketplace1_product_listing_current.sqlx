@@ -43,7 +43,7 @@ SELECT
     currency,
     SAFE_CAST(page_number AS INT64) AS page_number
 
-FROM ${source("marketplace1_product_listing")}
+FROM ${ref("amazon_product_listing_coffee_machines")}
 WHERE asin IS NOT NULL AND asin != ""
 ),
 

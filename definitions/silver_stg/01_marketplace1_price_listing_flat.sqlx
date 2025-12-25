@@ -40,5 +40,5 @@ SELECT
   SAFE_CAST(review_count AS INT64) AS review_count,
   NULLIF(TRIM(title), '') AS title
 
-FROM ${source("marketplace1_price_listing")}
+FROM ${ref("amazon_price_listing_coffee_machines")}
 WHERE asin IS NOT NULL AND TRIM(asin) != ''

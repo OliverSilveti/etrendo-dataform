@@ -31,7 +31,7 @@ SELECT
     SAFE_CAST(page_number AS INT64) AS page_number,
     extracted_at
 
-FROM ${source("otto_product_listing")}
+FROM ${ref("otto_product_listing_coffee_machines")}
 WHERE link IS NOT NULL
     AND TRIM(link) != ""
 ),

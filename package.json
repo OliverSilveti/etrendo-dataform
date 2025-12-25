@@ -1,6 +1,10 @@
 {
   "name": "etrendo-dataform",
   "dependencies": {
-    "@dataform/core": "2.0.1"
+    "@dataform/core": "3.0.37",
+    "long": "^5.2.3"
+  },
+  "devDependencies": {
+    "@dataform/cli": "3.0.37"
   }
 }

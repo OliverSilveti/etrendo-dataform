@@ -1,0 +1,694 @@
+{
+    "tables": [
+        {
+            "type": "table",
+            "target": {
+                "schema": "dataform",
+                "name": "00_bootstrap_marketplace1_product_listing_current",
+                "database": "etrendo-prd"
+            },
+            "query": "\n\nWITH\n-- ------------------------------------------------------------\n-- Step A: Clean & normalize raw Bronze types\n-- ------------------------------------------------------------\ncleaned AS (\n  SELECT\n    category_label,\n\n    -- node sometimes comes as string → normalize\n    SAFE_CAST(node AS INT64) AS node,\n\n    -- ASIN is the product identifier\n    asin,\n\n    extracted_at,\n\n    -- TRUE = sponsored, FALSE = organic\n    is_sponsored,\n\n    -- delivery is ARRAY<STRING> → convert to a readable single string\n    ARRAY_TO_STRING(delivery, \" | \") AS delivery,\n\n    -- money: use NUMERIC in silver\n    SAFE_CAST(extracted_price AS NUMERIC) AS extracted_price,\n\n    price_raw,\n    bought_last_month,\n\n    SAFE_CAST(reviews AS INT64) AS reviews,\n\n    -- clean text fields\n    NULLIF(TRIM(title), \"\") AS title,\n    link,\n\n    SAFE_CAST(position AS INT64) AS position,\n    SAFE_CAST(rating AS FLOAT64) AS rating,\n    currency,\n    SAFE_CAST(page_number AS INT64) AS page_number\n\n  FROM \n  WHERE asin IS NOT NULL AND asin != \"\"\n),\n\n-- ------------------------------------------------------------\n-- Step B: Choose ONE row per product key\n-- We keep only the \"winner\" row per (category_label,node,asin)\n-- ------------------------------------------------------------\nchosen AS (\n  SELECT * EXCEPT(rn)\n  FROM (\n    SELECT\n      cleaned.*,\n\n      -- Ranking logic:\n      -- 1) newest extracted_at first\n      -- 2) sponsored preferred over organic\n      ROW_NUMBER() OVER (\n        PARTITION BY category_label, node, asin\n        ORDER BY extracted_at DESC, is_sponsored DESC\n      ) AS rn\n\n    FROM cleaned\n  )\n  WHERE rn = 1\n),\n\n-- ------------------------------------------------------------\n-- Step C: Compute first_seen_at across full Bronze history\n-- (first time we ever saw the product in this category/node)\n-- ------------------------------------------------------------\nfirst_seen AS (\n  SELECT\n    category_label,\n    SAFE_CAST(node AS INT64) AS node,\n    asin,\n    MIN(extracted_at) AS first_seen_at\n  FROM \n  WHERE asin IS NOT NULL AND asin != \"\"\n  GROUP BY 1,2,3\n)\n\n-- ------------------------------------------------------------\n-- Step D: Build final Silver table rows\n-- ------------------------------------------------------------\nSELECT\n  c.category_label,\n  c.node,\n  c.asin,\n\n  c.extracted_at,\n  c.is_sponsored,\n\n  c.delivery,\n  c.extracted_price,\n  c.price_raw,\n  c.bought_last_month,\n  c.reviews,\n  c.title,\n  c.link,\n  c.position,\n  c.rating,\n  c.currency,\n  c.page_number,\n\n  -- first time seen\n  f.first_seen_at,\n\n  -- last time seen == the chosen row’s extracted_at\n  c.extracted_at AS last_seen_at,\n\n  -- brand new table = everything starts active\n  TRUE AS is_active,\n\n  -- audit timestamp for when Silver was generated\n  CURRENT_TIMESTAMP() AS silver_updated_at\n\nFROM chosen c\nLEFT JOIN first_seen f\nUSING (category_label, node, asin)\n",
+            "disabled": false,
+            "fileName": "definitions/silver/markeplace1/00_bootstrap_marketplace1_product_listing_current.sqlx",
+            "bigquery": {
+                "clusterBy": [
+                    "category_label",
+                    "node",
+                    "asin"
+                ]
+            },
+            "tags": [
+                "silver",
+                "marketplace1",
+                "products"
+            ],
+            "hermeticity": "NON_HERMETIC",
+            "canonicalTarget": {
+                "schema": "dataform",
+                "name": "00_bootstrap_marketplace1_product_listing_current",
+                "database": "etrendo-prd"
+            },
+            "enumType": "TABLE"
+        },
+        {
+            "type": "incremental",
+            "target": {
+                "schema": "dataform",
+                "name": "01_refresh_marketplace1_product_listing_current",
+                "database": "etrendo-prd"
+            },
+            "query": "\n\n-- ----------------------------------------------------------\n-- Step 1: Clean and normalize raw Bronze data\n-- - Fix inconsistent types (strings → numbers)\n-- - Convert delivery ARRAY<STRING> → single STRING\n-- - Remove invalid rows (missing ASIN)\n-- ----------------------------------------------------------\nWITH cleaned AS (\nSELECT\n    category_label,\n\n    -- Node sometimes arrives as string → normalize to INT\n    SAFE_CAST(node AS INT64) AS node,\n\n    asin,\n\n    extracted_at,\n\n    -- TRUE = sponsored, FALSE = organic\n    is_sponsored,\n\n    -- Flatten delivery array into readable text\n    ARRAY_TO_STRING(delivery, \" | \") AS delivery,\n\n    -- Prices & numeric cleanup\n    SAFE_CAST(extracted_price AS NUMERIC) AS extracted_price,\n    price_raw,\n    bought_last_month,\n\n    SAFE_CAST(reviews AS INT64) AS reviews,\n\n    -- Clean text fields\n    NULLIF(TRIM(title), \"\") AS title,\n    link,\n\n    SAFE_CAST(position AS INT64) AS position,\n    SAFE_CAST(rating AS FLOAT64) AS rating,\n    currency,\n    SAFE_CAST(page_number AS INT64) AS page_number\n\nFROM \nWHERE asin IS NOT NULL AND asin != \"\"\n),\n\n-- ----------------------------------------------------------\n-- Step 2: Deduplicate\n--\n-- For each (category_label, node, asin):\n-- - Take the latest extracted_at\n-- - If both sponsored & organic exist, sponsored WINS\n-- ----------------------------------------------------------\nchosen AS (\nSELECT * EXCEPT(rn)\nFROM (\n    SELECT\n    cleaned.*,\n\n    -- Ranking logic:\n    -- 1) newest extracted_at first\n    -- 2) sponsored preferred over organic\n    ROW_NUMBER() OVER (\n        PARTITION BY category_label, node, asin\n        ORDER BY extracted_at DESC, is_sponsored DESC\n    ) AS rn\n\n    FROM cleaned\n)\nWHERE rn = 1\n)\n\n-- ----------------------------------------------------------\n-- Step 3: Final shape used for MERGE\n-- ----------------------------------------------------------\nSELECT\ncategory_label,\nnode,\nasin,\n\nextracted_at,\nis_sponsored,\n\ndelivery,\nextracted_price,\nprice_raw,\nbought_last_month,\nreviews,\ntitle,\nlink,\nposition,\nrating,\ncurrency,\npage_number,\n\n-- Used to determine \"active/inactive\"\nextracted_at AS last_seen_at,\n\n-- audit column\nCURRENT_TIMESTAMP() AS silver_updated_at\n\nFROM chosen\n",
+            "disabled": false,
+            "protected": false,
+            "fileName": "definitions/silver/markeplace1/01_refresh_marketplace1_product_listing_current.sqlx",
+            "tags": [
+                "silver",
+                "marketplace1",
+                "products"
+            ],
+            "incrementalQuery": "\n\n-- ----------------------------------------------------------\n-- Step 1: Clean and normalize raw Bronze data\n-- - Fix inconsistent types (strings → numbers)\n-- - Convert delivery ARRAY<STRING> → single STRING\n-- - Remove invalid rows (missing ASIN)\n-- ----------------------------------------------------------\nWITH cleaned AS (\nSELECT\n    category_label,\n\n    -- Node sometimes arrives as string → normalize to INT\n    SAFE_CAST(node AS INT64) AS node,\n\n    asin,\n\n    extracted_at,\n\n    -- TRUE = sponsored, FALSE = organic\n    is_sponsored,\n\n    -- Flatten delivery array into readable text\n    ARRAY_TO_STRING(delivery, \" | \") AS delivery,\n\n    -- Prices & numeric cleanup\n    SAFE_CAST(extracted_price AS NUMERIC) AS extracted_price,\n    price_raw,\n    bought_last_month,\n\n    SAFE_CAST(reviews AS INT64) AS reviews,\n\n    -- Clean text fields\n    NULLIF(TRIM(title), \"\") AS title,\n    link,\n\n    SAFE_CAST(position AS INT64) AS position,\n    SAFE_CAST(rating AS FLOAT64) AS rating,\n    currency,\n    SAFE_CAST(page_number AS INT64) AS page_number\n\nFROM \nWHERE asin IS NOT NULL AND asin != \"\"\n),\n\n-- ----------------------------------------------------------\n-- Step 2: Deduplicate\n--\n-- For each (category_label, node, asin):\n-- - Take the latest extracted_at\n-- - If both sponsored & organic exist, sponsored WINS\n-- ----------------------------------------------------------\nchosen AS (\nSELECT * EXCEPT(rn)\nFROM (\n    SELECT\n    cleaned.*,\n\n    -- Ranking logic:\n    -- 1) newest extracted_at first\n    -- 2) sponsored preferred over organic\n    ROW_NUMBER() OVER (\n        PARTITION BY category_label, node, asin\n        ORDER BY extracted_at DESC, is_sponsored DESC\n    ) AS rn\n\n    FROM cleaned\n)\nWHERE rn = 1\n)\n\n-- ----------------------------------------------------------\n-- Step 3: Final shape used for MERGE\n-- ----------------------------------------------------------\nSELECT\ncategory_label,\nnode,\nasin,\n\nextracted_at,\nis_sponsored,\n\ndelivery,\nextracted_price,\nprice_raw,\nbought_last_month,\nreviews,\ntitle,\nlink,\nposition,\nrating,\ncurrency,\npage_number,\n\n-- Used to determine \"active/inactive\"\nextracted_at AS last_seen_at,\n\n-- audit column\nCURRENT_TIMESTAMP() AS silver_updated_at\n\nFROM chosen\n",
+            "uniqueKey": [
+                "category_label",
+                "node",
+                "asin"
+            ],
+            "hermeticity": "NON_HERMETIC",
+            "canonicalTarget": {
+                "schema": "dataform",
+                "name": "01_refresh_marketplace1_product_listing_current",
+                "database": "etrendo-prd"
+            },
+            "enumType": "INCREMENTAL",
+            "onSchemaChange": "IGNORE"
+        },
+        {
+            "type": "table",
+            "target": {
+                "schema": "dataform",
+                "name": "03_refresh_marketplace1_product_details_current",
+                "database": "etrendo-prd"
+            },
+            "query": "\n\nWITH ranked AS (\n  SELECT\n    *,\n    ROW_NUMBER() OVER (\n      PARTITION BY asin\n      ORDER BY extracted_at DESC\n    ) AS rn\n  FROM `etrendo-prd.dataform.00_marketplace1_product_details_flat`\n)\n\nSELECT\n  * EXCEPT (rn)\nFROM ranked\nWHERE rn = 1\n",
+            "disabled": false,
+            "fileName": "definitions/silver/markeplace1/03_refresh_marketplace1_product_details_current.sqlx",
+            "bigquery": {
+                "clusterBy": [
+                    "asin"
+                ]
+            },
+            "tags": [
+                "silver",
+                "marketplace1",
+                "products"
+            ],
+            "dependencyTargets": [
+                {
+                    "schema": "dataform",
+                    "name": "00_marketplace1_product_details_flat",
+                    "database": "etrendo-prd"
+                }
+            ],
+            "hermeticity": "NON_HERMETIC",
+            "canonicalTarget": {
+                "schema": "dataform",
+                "name": "03_refresh_marketplace1_product_details_current",
+                "database": "etrendo-prd"
+            },
+            "enumType": "TABLE"
+        },
+        {
+            "type": "table",
+            "target": {
+                "schema": "dataform",
+                "name": "04_marketplace1_snapshot_category_daily_v0",
+                "database": "etrendo-prd"
+            },
+            "query": "\n\nCREATE OR REPLACE TABLE `etrendo-prd.amazon_silver.amazon_coffee_machines_snapshot_daily_base`\nPARTITION BY snapshot_date\nCLUSTER BY asin AS\nSELECT\n  DATE(extracted_at) AS snapshot_date,\n  extracted_at,\n\n  asin,\n  node,\n  category_label,\n  title,\n  brand,\n  url,\n\n  currency,\n\n  -- PDP truth (clean)\n  price_clean            AS pdp_price,\n  price_shipping_clean   AS pdp_price_shipping,\n  total_price_clean      AS pdp_total_price,\n\n  -- Buy Box fields (already parsed)\n  buybox_seller_id,\n  buybox_seller_name,\n  buybox_price_from_json_clean AS buybox_price_from_json,\n  buybox_is_amazon,\n  buybox_stock,\n\n  -- Availability / debug\n  stock,\n  item_status,\n  status_code,\n  error_message,\n\n  -- Key quality label\n  pdp_extraction_state,\n\n  -- Simple business-facing state\n  CASE\n    WHEN pdp_extraction_state = 'COMPLETE' THEN 'BUYABLE'\n    WHEN pdp_extraction_state = 'INCOMPLETE_PRICE_EXTRACTION' THEN 'INCOMPLETE'\n    ELSE 'UNKNOWN'\n  END AS pdp_state\n\nFROM `etrendo-prd.dataform.00_marketplace1_product_details_flat`\nQUALIFY ROW_NUMBER() OVER (\n  PARTITION BY asin, DATE(extracted_at)\n  ORDER BY extracted_at DESC\n) = 1\n",
+            "disabled": false,
+            "fileName": "definitions/silver/markeplace1/04_marketplace1_snapshot_category_daily_v0.sqlx",
+            "bigquery": {
+                "partitionBy": "snapshot_date",
+                "clusterBy": [
+                    "asin"
+                ]
+            },
+            "tags": [
+                "silver",
+                "marketplace1",
+                "daily_snapshot"
+            ],
+            "dependencyTargets": [
+                {
+                    "schema": "dataform",
+                    "name": "00_marketplace1_product_details_flat",
+                    "database": "etrendo-prd"
+                }
+            ],
+            "hermeticity": "NON_HERMETIC",
+            "canonicalTarget": {
+                "schema": "dataform",
+                "name": "04_marketplace1_snapshot_category_daily_v0",
+                "database": "etrendo-prd"
+            },
+            "enumType": "TABLE"
+        },
+        {
+            "type": "table",
+            "target": {
+                "schema": "dataform",
+                "name": "05_daily_offers_summary_marketplace1_daily_v0",
+                "database": "etrendo-prd"
+            },
+            "query": "\n\nSELECT\n  DATE(extracted_at) AS offer_date,\n  asin,\n\n  COUNT(*) AS offer_rows,\n  COUNT(DISTINCT NULLIF(TRIM(seller_id), '')) AS seller_id_count,\n\n  MIN(SAFE_CAST(price AS NUMERIC) + COALESCE(SAFE_CAST(price_shipping AS NUMERIC), 0)) AS min_total_price,\n  APPROX_QUANTILES(SAFE_CAST(price AS NUMERIC) + COALESCE(SAFE_CAST(price_shipping AS NUMERIC), 0), 2)[OFFSET(1)] AS median_total_price,\n  MAX(SAFE_CAST(price AS NUMERIC) + COALESCE(SAFE_CAST(price_shipping AS NUMERIC), 0)) AS max_total_price\n\nFROM `etrendo-prd.dataform.01_marketplace1_price_listing_flat`\nWHERE asin IS NOT NULL AND TRIM(asin) != ''\n  AND SAFE_CAST(price AS NUMERIC) > 0   -- filters junk rows\nGROUP BY offer_date, asin\n",
+            "disabled": false,
+            "fileName": "definitions/silver/markeplace1/05_daily_offers_summary_marketplace1_daily_v0.sqlx",
+            "bigquery": {
+                "partitionBy": "offer_date",
+                "clusterBy": [
+                    "asin"
+                ]
+            },
+            "tags": [
+                "silver",
+                "marketplace1",
+                "daily_offers"
+            ],
+            "dependencyTargets": [
+                {
+                    "schema": "dataform",
+                    "name": "01_marketplace1_price_listing_flat",
+                    "database": "etrendo-prd"
+                }
+            ],
+            "hermeticity": "NON_HERMETIC",
+            "canonicalTarget": {
+                "schema": "dataform",
+                "name": "05_daily_offers_summary_marketplace1_daily_v0",
+                "database": "etrendo-prd"
+            },
+            "enumType": "TABLE"
+        },
+        {
+            "type": "table",
+            "target": {
+                "schema": "dataform",
+                "name": "06_daily_snapshot_marketplace1_category_daily_v1",
+                "database": "etrendo-prd"
+            },
+            "query": "\n\nWITH listing_latest AS (\n  SELECT * EXCEPT(rn)\n  FROM (\n    SELECT\n      l.*,\n      ROW_NUMBER() OVER (PARTITION BY asin ORDER BY extracted_at DESC) AS rn\n    FROM `etrendo-prd.dataform.01_refresh_marketplace1_product_listing_current` l\n    WHERE asin IS NOT NULL AND TRIM(asin) != ''\n  )\n  WHERE rn = 1\n)\nSELECT\n  s.snapshot_date,\n  s.extracted_at,\n  s.asin,\n  s.node,\n  s.category_label,\n  s.currency,\n\n  -- PDP truth\n  s.pdp_price            AS pdp_price,\n  s.pdp_price_shipping   AS pdp_price_shipping,\n  s.pdp_total_price      AS pdp_total_price,\n\n  s.buybox_seller_id,\n  s.buybox_seller_name,\n  s.buybox_is_amazon,\n  s.buybox_stock,\n  s.pdp_extraction_state,\n\n  -- Listing context (latest row per ASIN; ignore extracted_at mismatch)\n  l.is_sponsored,\n  l.position AS listing_position,\n\n  -- Use listing-provided page (no inferred bucket logic)\n  SAFE_CAST(l.page_number AS INT64) AS listing_page,\n\n  -- Offers summary (daily)\n  COALESCE(o.offer_rows, 0) AS offer_rows,\n  COALESCE(o.seller_id_count, 0) AS seller_id_count,\n  o.min_total_price,\n  o.median_total_price,\n  o.max_total_price,\n\n  -- Coverage flag for trust\n  CASE\n    WHEN s.pdp_extraction_state = 'COMPLETE' AND COALESCE(o.offer_rows, 0) > 0 THEN 'DETAIL_PLUS_OFFERS'\n    WHEN s.pdp_extraction_state = 'COMPLETE' THEN 'DETAIL_ONLY'\n    ELSE 'INCOMPLETE_PDP'\n  END AS data_coverage\n\nFROM `etrendo-prd.dataform.04_marketplace1_snapshot_category_daily_v0` s\nLEFT JOIN listing_latest l\n  ON l.asin = s.asin\nLEFT JOIN `etrendo-prd.dataform.05_daily_offers_summary_marketplace1_daily_v0` o\n  ON o.asin = s.asin\n AND o.offer_date = s.snapshot_date\n",
+            "disabled": false,
+            "fileName": "definitions/silver/markeplace1/06_daily_snapshot_marketplace1_category_daily_v1.sqlx",
+            "bigquery": {
+                "partitionBy": "snapshot_date",
+                "clusterBy": [
+                    "asin"
+                ]
+            },
+            "tags": [
+                "silver",
+                "marketplace1",
+                "daily_snapshot"
+            ],
+            "dependencyTargets": [
+                {
+                    "schema": "dataform",
+                    "name": "01_refresh_marketplace1_product_listing_current",
+                    "database": "etrendo-prd"
+                },
+                {
+                    "schema": "dataform",
+                    "name": "04_marketplace1_snapshot_category_daily_v0",
+                    "database": "etrendo-prd"
+                },
+                {
+                    "schema": "dataform",
+                    "name": "05_daily_offers_summary_marketplace1_daily_v0",
+                    "database": "etrendo-prd"
+                }
+            ],
+            "hermeticity": "NON_HERMETIC",
+            "canonicalTarget": {
+                "schema": "dataform",
+                "name": "06_daily_snapshot_marketplace1_category_daily_v1",
+                "database": "etrendo-prd"
+            },
+            "enumType": "TABLE"
+        },
+        {
+            "type": "table",
+            "target": {
+                "schema": "dataform",
+                "name": "00_bootstrap_marketplace2_coffee_machines_current",
+                "database": "etrendo-prd"
+            },
+            "query": "\n\nWITH cleaned AS (\n  SELECT\n    category_label,\n\n    -- Canonical URL (removes tracking params)\n    REGEXP_REPLACE(TRIM(link), r'\\\\?.*$', '') AS canonical_link,\n\n    -- Stable surrogate key (NOT a business product ID)\n    CAST(\n      ABS(\n        FARM_FINGERPRINT(\n          REGEXP_REPLACE(TRIM(link), r'\\\\?.*$', '')\n        )\n      ) AS STRING\n    ) AS product_key,\n\n    NULLIF(TRIM(title), \"\") AS title,\n    price_raw,\n\n    -- Optional price parsing (safe if NULL / malformed)\n    SAFE_CAST(\n      REPLACE(\n        REPLACE(REGEXP_EXTRACT(price_raw, r'[\\\\d\\\\.,]+'), '.', ''),\n        ',', '.'\n      ) AS NUMERIC\n    ) AS price,\n\n    SAFE_CAST(page_number AS INT64) AS page_number,\n    extracted_at\n\n  FROM \n  WHERE link IS NOT NULL\n    AND TRIM(link) != \"\"\n),\n\n-- ------------------------------------------------------------\n-- Choose ONE row per product_key\n-- Prefer rows that have page_number, then newest extracted_at\n-- ------------------------------------------------------------\nchosen AS (\n  SELECT * EXCEPT(rn)\n  FROM (\n    SELECT\n      cleaned.*,\n      ROW_NUMBER() OVER (\n        PARTITION BY category_label, product_key\n        ORDER BY\n          page_number IS NOT NULL DESC,\n          extracted_at DESC\n      ) AS rn\n    FROM cleaned\n  )\n  WHERE rn = 1\n),\n\n-- ------------------------------------------------------------\n-- First time the product ever appeared in Bronze\n-- ------------------------------------------------------------\nfirst_seen AS (\n  SELECT\n    category_label,\n    CAST(\n      ABS(\n        FARM_FINGERPRINT(\n          REGEXP_REPLACE(TRIM(link), r'\\\\?.*$', '')\n        )\n      ) AS STRING\n    ) AS product_key,\n    MIN(extracted_at) AS first_seen_at\n  FROM \n  WHERE link IS NOT NULL\n    AND TRIM(link) != \"\"\n  GROUP BY 1,2\n)\n\n-- ------------------------------------------------------------\n-- Final Silver table\n-- ------------------------------------------------------------\nSELECT\n  c.category_label,\n  c.product_key,\n  c.canonical_link,\n  c.title,\n  c.price_raw,\n  c.price,\n  c.page_number,\n  c.extracted_at,\n\n  f.first_seen_at,\n  c.extracted_at AS last_seen_at,\n  TRUE AS is_active,\n\n  CURRENT_TIMESTAMP() AS silver_updated_at\nFROM chosen c\nLEFT JOIN first_seen f\nUSING (category_label, product_key)\n",
+            "disabled": false,
+            "fileName": "definitions/silver/marketplace2/00_bootstrap_marketplace2_coffee_machines_current.sqlx",
+            "bigquery": {
+                "clusterBy": [
+                    "category_label",
+                    "product_key"
+                ]
+            },
+            "tags": [
+                "silver",
+                "marketplace2",
+                "products"
+            ],
+            "hermeticity": "NON_HERMETIC",
+            "canonicalTarget": {
+                "schema": "dataform",
+                "name": "00_bootstrap_marketplace2_coffee_machines_current",
+                "database": "etrendo-prd"
+            },
+            "enumType": "TABLE"
+        },
+        {
+            "type": "incremental",
+            "target": {
+                "schema": "dataform",
+                "name": "01_refresh_marketplace2_coffee_machines_current",
+                "database": "etrendo-prd"
+            },
+            "query": "\n\nWITH cleaned AS (\nSELECT\n    category_label,\n\n    REGEXP_REPLACE(TRIM(link), r'\\\\?.*$', '') AS canonical_link,\n\n    CAST(\n    ABS(\n        FARM_FINGERPRINT(\n        REGEXP_REPLACE(TRIM(link), r'\\\\?.*$', '')\n        )\n    ) AS STRING\n    ) AS product_key,\n\n    NULLIF(TRIM(title), \"\") AS title,\n    price_raw,\n\n    SAFE_CAST(\n    REPLACE(\n        REPLACE(REGEXP_EXTRACT(price_raw, r'[\\\\d\\\\.,]+'), '.', ''),\n        ',', '.'\n    ) AS NUMERIC\n    ) AS price,\n\n    SAFE_CAST(page_number AS INT64) AS page_number,\n    extracted_at\n\nFROM \nWHERE link IS NOT NULL\n    AND TRIM(link) != \"\"\n),\n\n-- Choose 1 row per product_key\nchosen AS (\nSELECT * EXCEPT(rn)\nFROM (\n    SELECT\n    cleaned.*,\n    ROW_NUMBER() OVER (\n        PARTITION BY category_label, product_key\n        ORDER BY\n        page_number IS NOT NULL DESC,\n        extracted_at DESC\n    ) AS rn\n    FROM cleaned\n)\nWHERE rn = 1\n)\n\nSELECT\ncategory_label,\nproduct_key,\ncanonical_link,\ntitle,\nprice_raw,\nprice,\npage_number,\nextracted_at,\nextracted_at AS last_seen_at,\nCURRENT_TIMESTAMP() AS silver_updated_at\nFROM chosen\n",
+            "disabled": false,
+            "protected": false,
+            "fileName": "definitions/silver/marketplace2/01_refresh_marketplace2_coffee_machines_current.sqlx",
+            "tags": [
+                "silver",
+                "marketplace2",
+                "products"
+            ],
+            "incrementalQuery": "\n\nWITH cleaned AS (\nSELECT\n    category_label,\n\n    REGEXP_REPLACE(TRIM(link), r'\\\\?.*$', '') AS canonical_link,\n\n    CAST(\n    ABS(\n        FARM_FINGERPRINT(\n        REGEXP_REPLACE(TRIM(link), r'\\\\?.*$', '')\n        )\n    ) AS STRING\n    ) AS product_key,\n\n    NULLIF(TRIM(title), \"\") AS title,\n    price_raw,\n\n    SAFE_CAST(\n    REPLACE(\n        REPLACE(REGEXP_EXTRACT(price_raw, r'[\\\\d\\\\.,]+'), '.', ''),\n        ',', '.'\n    ) AS NUMERIC\n    ) AS price,\n\n    SAFE_CAST(page_number AS INT64) AS page_number,\n    extracted_at\n\nFROM \nWHERE link IS NOT NULL\n    AND TRIM(link) != \"\"\n),\n\n-- Choose 1 row per product_key\nchosen AS (\nSELECT * EXCEPT(rn)\nFROM (\n    SELECT\n    cleaned.*,\n    ROW_NUMBER() OVER (\n        PARTITION BY category_label, product_key\n        ORDER BY\n        page_number IS NOT NULL DESC,\n        extracted_at DESC\n    ) AS rn\n    FROM cleaned\n)\nWHERE rn = 1\n)\n\nSELECT\ncategory_label,\nproduct_key,\ncanonical_link,\ntitle,\nprice_raw,\nprice,\npage_number,\nextracted_at,\nextracted_at AS last_seen_at,\nCURRENT_TIMESTAMP() AS silver_updated_at\nFROM chosen\n",
+            "uniqueKey": [
+                "category_label",
+                "product_key"
+            ],
+            "hermeticity": "NON_HERMETIC",
+            "canonicalTarget": {
+                "schema": "dataform",
+                "name": "01_refresh_marketplace2_coffee_machines_current",
+                "database": "etrendo-prd"
+            },
+            "enumType": "INCREMENTAL",
+            "onSchemaChange": "IGNORE"
+        },
+        {
+            "type": "table",
+            "target": {
+                "schema": "dataform",
+                "name": "00_marketplace1_product_details_flat",
+                "database": "etrendo-prd"
+            },
+            "query": "\n\nSELECT\n  -- =========================\n  -- KEYS\n  -- =========================\n  NULLIF(TRIM(asin), '') AS asin,\n  NULLIF(TRIM(category_label), '') AS category_label,\n  extracted_at,\n  NULLIF(TRIM(node), '') AS node,\n\n  -- =========================\n  -- PRODUCT IDENTITY\n  -- =========================\n  NULLIF(TRIM(title), '') AS title,\n  NULLIF(TRIM(brand), '') AS brand,\n  NULLIF(TRIM(product_name), '') AS product_name,\n  NULLIF(TRIM(url), '') AS url,\n  NULLIF(TRIM(parent_asin), '') AS parent_asin,\n  NULLIF(TRIM(manufacturer), '') AS manufacturer,\n\n  -- =========================\n  -- STATUS / DEBUG\n  -- =========================\n  NULLIF(TRIM(page_type), '') AS page_type,\n  NULLIF(TRIM(stock), '') AS stock,\n  NULLIF(TRIM(item_status), '') AS item_status,\n  SAFE_CAST(status_code AS INT64) AS status_code,\n  NULLIF(TRIM(error_message), '') AS error_message,\n\n  -- =========================\n  -- RATINGS\n  -- =========================\n  SAFE_CAST(rating AS FLOAT64) AS rating,\n  SAFE_CAST(review_count AS INT64) AS review_count,\n\n  -- =========================\n  -- PRICING (TYPED)\n  -- =========================\n  NULLIF(TRIM(currency), '') AS currency,\n  SAFE_CAST(price AS NUMERIC) AS price,\n  SAFE_CAST(price_upper AS NUMERIC) AS price_upper,\n  SAFE_CAST(price_initial AS NUMERIC) AS price_initial,\n  SAFE_CAST(price_shipping AS NUMERIC) AS price_shipping,\n  SAFE_CAST(price_buybox AS NUMERIC) AS price_buybox,\n  SAFE_CAST(price_sns AS NUMERIC) AS price_sns,\n\n  -- =========================\n  -- BUY BOX SELLER (KEY PART)\n  -- =========================\n  NULLIF(TRIM(JSON_VALUE(buybox, '$[0].seller_id')), '') AS buybox_seller_id,\n  NULLIF(TRIM(JSON_VALUE(buybox, '$[0].seller_name')), '') AS buybox_seller_name,\n  NULLIF(TRIM(JSON_VALUE(buybox, '$[0].stock')), '') AS buybox_stock,\n\n  SAFE_CAST(JSON_VALUE(buybox, '$[0].price') AS NUMERIC) AS buybox_price_from_json,\n\n  -- Simple MVP flag: is Amazon winning the Buy Box?\n  LOWER(NULLIF(TRIM(JSON_VALUE(buybox, '$[0].seller_name')), '')) = 'amazon'\n    AS buybox_is_amazon,\n\n  -- =========================\n  -- OTHER USEFUL FLAGS\n  -- =========================\n  SAFE_CAST(is_prime_eligible AS BOOL) AS is_prime_eligible,\n  SAFE_CAST(has_videos AS BOOL) AS has_videos,\n  NULLIF(TRIM(main_image), '') AS main_image,\n  NULLIF(TRIM(bullet_points), '') AS bullet_points,\n  NULLIF(TRIM(sales_volume), '') AS sales_volume,\n  NULLIF(TRIM(coupon), '') AS coupon,\n\n  -- =========================\n  -- SEMI-STRUCTURED (KEEP)\n  -- =========================\n  description,\n  category,\n  images,\n  delivery,\n  buybox,\n  rating_stars_distribution,\n  product_details,\n  product_overview,\n  technical_details,\n  sales_rank,\n  variation_selected_dimensions,\n  variation_all,\n  sns_discounts,\n\n  -- =========================\n  -- RAW PAYLOAD (ALWAYS KEEP)\n  -- =========================\n  payload_raw\n\nFROM \nWHERE asin IS NOT NULL\n  AND TRIM(asin) != ''\n",
+            "disabled": false,
+            "fileName": "definitions/silver_stg/00_marketplace1_product_details_flat.sqlx",
+            "bigquery": {
+                "partitionBy": "DATE(extracted_at)",
+                "clusterBy": [
+                    "asin"
+                ]
+            },
+            "tags": [
+                "silver_stg",
+                "marketplace1"
+            ],
+            "hermeticity": "NON_HERMETIC",
+            "canonicalTarget": {
+                "schema": "dataform",
+                "name": "00_marketplace1_product_details_flat",
+                "database": "etrendo-prd"
+            },
+            "enumType": "TABLE"
+        },
+        {
+            "type": "table",
+            "target": {
+                "schema": "dataform",
+                "name": "01_marketplace1_price_listing_flat",
+                "database": "etrendo-prd"
+            },
+            "query": "\n\nSELECT\n  extracted_at,\n\n  SAFE_CAST(node_label AS INT64) AS node_label,\n  NULLIF(TRIM(category_label), '') AS category_label,\n  NULLIF(TRIM(asin), '') AS asin,\n\n  -- NEW: offer position in the offers list (1..N)\n  SAFE_CAST(offer_position AS INT64) AS offer_position,\n\n  -- NEW: pricing status (you define values in ingestion)\n  -- Examples: 'BUYBOX', 'OTHER', 'UNAVAILABLE', 'OOS'\n  NULLIF(TRIM(pricing_status), '') AS pricing_status,\n\n  NULLIF(TRIM(delivery_date), '') AS delivery_date,\n  NULLIF(TRIM(delivery), '') AS delivery_text,\n  NULLIF(TRIM(delivery_type), '') AS delivery_type,\n\n  NULLIF(TRIM(seller_link), '') AS seller_link,\n  NULLIF(TRIM(url), '') AS url,\n\n  NULLIF(TRIM(seller_id), '') AS seller_id,\n  NULLIF(TRIM(seller), '') AS seller_name,\n\n  NULLIF(TRIM(condition), '') AS condition,\n  NULLIF(TRIM(currency), '') AS currency,\n\n  SAFE_CAST(price AS NUMERIC) AS price,\n  SAFE_CAST(price_shipping AS NUMERIC) AS price_shipping,\n  SAFE_CAST(price AS NUMERIC) + COALESCE(SAFE_CAST(price_shipping AS NUMERIC), 0) AS total_price,\n\n  SAFE_CAST(rating_count AS INT64) AS rating_count,\n  SAFE_CAST(review_count AS INT64) AS review_count,\n  NULLIF(TRIM(title), '') AS title\n\nFROM \nWHERE asin IS NOT NULL AND TRIM(asin) != ''\n",
+            "disabled": false,
+            "fileName": "definitions/silver_stg/01_marketplace1_price_listing_flat.sqlx",
+            "bigquery": {
+                "partitionBy": "DATE(extracted_at)",
+                "clusterBy": [
+                    "asin"
+                ]
+            },
+            "tags": [
+                "silver_stg",
+                "marketplace1"
+            ],
+            "hermeticity": "NON_HERMETIC",
+            "canonicalTarget": {
+                "schema": "dataform",
+                "name": "01_marketplace1_price_listing_flat",
+                "database": "etrendo-prd"
+            },
+            "enumType": "TABLE"
+        }
+    ],
+    "operations": [
+        {
+            "target": {
+                "schema": "dataform",
+                "name": "00_schema_marketplace1_product_details",
+                "database": "etrendo-prd"
+            },
+            "queries": [
+                "CREATE OR REPLACE EXTERNAL TABLE `etrendo-prd.amazon_bronze.amazon_product_details_coffee_machines` (\n  asin STRING,\n  category_label STRING,\n  extracted_at TIMESTAMP,\n  node STRING,\n  title STRING,\n  brand STRING,\n  url STRING,\n  page_type STRING,\n  stock STRING,\n  price FLOAT64,\n  price_upper FLOAT64,\n  price_initial FLOAT64,\n  price_shipping FLOAT64,\n  price_buybox FLOAT64,\n  price_sns FLOAT64,\n  currency STRING,\n  rating FLOAT64,\n  review_count INT64,\n  sales_volume STRING,\n  parent_asin STRING,\n  product_name STRING,\n  description JSON,\n  coupon STRING,\n  store_url STRING,\n  pricing_url STRING,\n  pricing_str STRING,\n  manufacturer STRING,\n  category JSON,\n  is_prime_eligible BOOL,\n  has_videos BOOL,\n  images JSON,\n  main_image STRING,\n  bullet_points STRING,\n  variation_selected_asin STRING,\n  variation_selected_dimensions JSON,\n  variation_all JSON,\n  sales_rank JSON,\n  delivery JSON,\n  buybox JSON,\n  rating_stars_distribution JSON,\n  product_details JSON,\n  product_overview JSON,\n  technical_details JSON,\n  other_sellers STRING,\n  sns_discounts JSON,\n  answered_questions_count INT64,\n  item_status STRING,\n  error_message STRING,\n  status_code INT64,\n  payload_raw STRING\n)\nOPTIONS (\n  format = 'JSON',\n  uris = ['gs://amazon-product-details-raw-etrendo-prd/coffee_machines-13528250031/*.jsonl']\n);"
+            ],
+            "fileName": "definitions/bronze/00_schema_marketplace1_product_details.sqlx",
+            "hermeticity": "NON_HERMETIC",
+            "canonicalTarget": {
+                "schema": "dataform",
+                "name": "00_schema_marketplace1_product_details",
+                "database": "etrendo-prd"
+            }
+        },
+        {
+            "target": {
+                "schema": "dataform",
+                "name": "01_schema_marketplace1_price_listing",
+                "database": "etrendo-prd"
+            },
+            "queries": [
+                "CREATE OR REPLACE EXTERNAL TABLE `etrendo-prd.amazon_bronze.amazon_price_listing_coffee_machines` (\n  asin STRING,\n  title STRING,\n  url STRING,\n  review_count FLOAT64,\n  seller STRING,\n  price FLOAT64,\n  currency STRING,\n  price_shipping FLOAT64,\n  condition STRING,\n  rating_count FLOAT64,\n  seller_id STRING,\n  seller_link STRING,\n  delivery STRING,\n  delivery_type STRING,\n  delivery_date STRING,\n  offer_position FLOAT64,\n  delivery_option_position FLOAT64,\n  category_label STRING,\n  node_label STRING,\n  extracted_at TIMESTAMP,\n  pricing_status STRING,\n  error_message STRING\n)\nOPTIONS (\n  format = 'JSON',\n  uris = ['gs://amazon-pricing-listing-raw-etrendo-prd/coffee_machines-13528250031/*.jsonl']\n);"
+            ],
+            "fileName": "definitions/bronze/01_schema_marketplace1_price_listing.sqlx",
+            "hermeticity": "NON_HERMETIC",
+            "canonicalTarget": {
+                "schema": "dataform",
+                "name": "01_schema_marketplace1_price_listing",
+                "database": "etrendo-prd"
+            }
+        },
+        {
+            "target": {
+                "schema": "dataform",
+                "name": "02_set_active_flags_marketplace1_product_listing_current",
+                "database": "etrendo-prd"
+            },
+            "queries": [
+                "/*\n  This file is an \"operations\" file. It doesn't create a table itself, \n  but it runs an UPDATE statement on an existing table.\n  This is how Dataform handles UPDATE statements from your original SQL files.\n*/\n\n\n-- This is the same UPDATE statement from your original .sql file.\n-- It marks products as active or inactive based on how recently they were seen.\nDECLARE ACTIVE_WINDOW_DAYS INT64 DEFAULT 7;\n\n-- The ref() function tells Dataform to run this UPDATE statement on the\n-- table created by the \"00_bootstrap_marketplace1_product_listing_current\" file.\nUPDATE `etrendo-prd.dataform.01_refresh_marketplace1_product_listing_current`\nSET\n  is_active = last_seen_at >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL ACTIVE_WINDOW_DAYS DAY)\nWHERE TRUE\n"
+            ],
+            "fileName": "definitions/silver/markeplace1/02_set_active_flags_marketplace1_product_listing_current.sqlx",
+            "tags": [
+                "silver",
+                "marketplace1",
+                "products"
+            ],
+            "dependencyTargets": [
+                {
+                    "schema": "dataform",
+                    "name": "01_refresh_marketplace1_product_listing_current",
+                    "database": "etrendo-prd"
+                }
+            ],
+            "hermeticity": "NON_HERMETIC",
+            "canonicalTarget": {
+                "schema": "dataform",
+                "name": "02_set_active_flags_marketplace1_product_listing_current",
+                "database": "etrendo-prd"
+            }
+        },
+        {
+            "target": {
+                "schema": "dataform",
+                "name": "02_set_active_flags_marketplace2_product_listing_coffee_machines",
+                "database": "etrendo-prd"
+            },
+            "queries": [
+                "\n\nDECLARE ACTIVE_WINDOW_DAYS INT64 DEFAULT 7;\n\nUPDATE `etrendo-prd.dataform.01_refresh_marketplace2_coffee_machines_current`\nSET is_active = last_seen_at >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL ACTIVE_WINDOW_DAYS DAY)\nWHERE TRUE\n"
+            ],
+            "fileName": "definitions/silver/marketplace2/02_set_active_flags_marketplace2_product_listing_coffee_machines.sqlx",
+            "tags": [
+                "silver",
+                "marketplace2",
+                "products"
+            ],
+            "dependencyTargets": [
+                {
+                    "schema": "dataform",
+                    "name": "01_refresh_marketplace2_coffee_machines_current",
+                    "database": "etrendo-prd"
+                }
+            ],
+            "hermeticity": "NON_HERMETIC",
+            "canonicalTarget": {
+                "schema": "dataform",
+                "name": "02_set_active_flags_marketplace2_product_listing_coffee_machines",
+                "database": "etrendo-prd"
+            }
+        },
+        {
+            "target": {
+                "schema": "dataform",
+                "name": "source_declarations",
+                "database": "etrendo-prd"
+            },
+            "queries": [
+                "-- In this file, you declare the raw source tables from BigQuery that your project will use.\n-- Docs: https://docs.dataform.co/guides/source-control/declare-a-source\n\n/*\n-- Example of declaring a raw table from a fictitious \"marketplace_raw_data\" dataset\nsource \"raw_listings\" {\n  type: \"table\",\n  schema: \"marketplace_raw_data\",\n  name: \"listings\"\n}\n*/\n\n-- marketplace1 product details\ndeclaration \"marketplace1_product_details\" {\n    type: \"table\",\n    database: \"etrendo-prd\",\n    schema: \"amazon_bronze\",\nname: \"amazon_product_details_coffee_machines\"\n}\n\n-- marketplace1 price listing\ndeclaration \"marketplace1_price_listing\" {\n    type: \"table\",\n    database: \"etrendo-prd\",\n    schema: \"amazon_bronze\",\n    name: \"amazon_price_listing_coffee_machines\"\n}\n\n-- listings\ndeclaration \"listings\" {\n    type: \"table\",\n    database: \"etrendo-prd\",\n    schema: \"amazon_bronze\",\n    name: \"listings\"\n}\n\n-- reviews\ndeclaration \"reviews\" {\n    type: \"table\",\n    database: \"etrendo-prd\",\n    schema: \"amazon_bronze\",\n    name: \"reviews\"\n}\n\n-- otto product listing\ndeclaration \"otto_product_listing\" {\n    type: \"table\",\n    database: \"etrendo-prd\",\n    schema: \"otto_bronze\",\n    name: \"otto_product_listing_coffee_machines\"\n}\n\n-- marketplace1 product listing\ndeclaration \"marketplace1_product_listing\" {\n    type: \"table\",\n    database: \"etrendo-prd\",\n    schema: \"amazon_bronze\",\n    name: \"amazon_product_listing_coffee_machines\"\n}\n"
+            ],
+            "fileName": "definitions/sources/source_declarations.sqlx",
+            "hermeticity": "NON_HERMETIC",
+            "canonicalTarget": {
+                "schema": "dataform",
+                "name": "source_declarations",
+                "database": "etrendo-prd"
+            }
+        }
+    ],
+    "projectConfig": {
+        "warehouse": "bigquery",
+        "defaultSchema": "dataform",
+        "assertionSchema": "dataform_assertions",
+        "defaultDatabase": "etrendo-prd"
+    },
+    "graphErrors": {
+        "compilationErrors": [
+            {
+                "fileName": "definitions/silver/markeplace1/00_bootstrap_marketplace1_product_listing_current.sqlx",
+                "message": "Could not resolve \"marketplace1_product_listing\"",
+                "stack": "Error: Could not resolve \"marketplace1_product_listing\"\n    at t.Session.resolve (/private/var/folders/pz/jpnd1_655wn55npy9jlxvt9m0000gn/T/tmp-74802-0iwBuVUajCEB/node_modules/@dataform/core/bundle.js:15:78859)\n    at f.resolve (/private/var/folders/pz/jpnd1_655wn55npy9jlxvt9m0000gn/T/tmp-74802-0iwBuVUajCEB/node_modules/@dataform/core/bundle.js:15:48426)\n    at f.ref (/private/var/folders/pz/jpnd1_655wn55npy9jlxvt9m0000gn/T/tmp-74802-0iwBuVUajCEB/node_modules/@dataform/core/bundle.js:15:48292)\n    at Object.sqlContextable (/private/var/folders/pz/jpnd1_655wn55npy9jlxvt9m0000gn/T/tmp-74802-0iwBuVUajCEB/definitions/silver/markeplace1/00_bootstrap_marketplace1_product_listing_current.sqlx:64:10)\n    at /private/var/folders/pz/jpnd1_655wn55npy9jlxvt9m0000gn/T/tmp-74802-0iwBuVUajCEB/node_modules/@dataform/core/bundle.js:15:77111\n    at f.apply (/private/var/folders/pz/jpnd1_655wn55npy9jlxvt9m0000gn/T/tmp-74802-0iwBuVUajCEB/node_modules/@dataform/core/bundle.js:15:49145)\n    at d.compile (/private/var/folders/pz/jpnd1_655wn55npy9jlxvt9m0000gn/T/tmp-74802-0iwBuVUajCEB/node_modules/@dataform/core/bundle.js:15:45250)\n    at /private/var/folders/pz/jpnd1_655wn55npy9jlxvt9m0000gn/T/tmp-74802-0iwBuVUajCEB/node_modules/@dataform/core/bundle.js:15:82936\n    at Array.forEach (<anonymous>)\n    at t.Session.compileGraphChunk (/private/var/folders/pz/jpnd1_655wn55npy9jlxvt9m0000gn/T/tmp-74802-0iwBuVUajCEB/node_modules/@dataform/core/bundle.js:15:82909)"
+            },
+            {
+                "fileName": "definitions/silver/markeplace1/00_bootstrap_marketplace1_product_listing_current.sqlx",
+                "message": "Could not resolve \"marketplace1_product_listing\"",
+                "stack": "Error: Could not resolve \"marketplace1_product_listing\"\n    at t.Session.resolve (/private/var/folders/pz/jpnd1_655wn55npy9jlxvt9m0000gn/T/tmp-74802-0iwBuVUajCEB/node_modules/@dataform/core/bundle.js:15:78859)\n    at f.resolve (/private/var/folders/pz/jpnd1_655wn55npy9jlxvt9m0000gn/T/tmp-74802-0iwBuVUajCEB/node_modules/@dataform/core/bundle.js:15:48426)\n    at f.ref (/private/var/folders/pz/jpnd1_655wn55npy9jlxvt9m0000gn/T/tmp-74802-0iwBuVUajCEB/node_modules/@dataform/core/bundle.js:15:48292)\n    at Object.sqlContextable (/private/var/folders/pz/jpnd1_655wn55npy9jlxvt9m0000gn/T/tmp-74802-0iwBuVUajCEB/definitions/silver/markeplace1/00_bootstrap_marketplace1_product_listing_current.sqlx:101:10)\n    at /private/var/folders/pz/jpnd1_655wn55npy9jlxvt9m0000gn/T/tmp-74802-0iwBuVUajCEB/node_modules/@dataform/core/bundle.js:15:77111\n    at f.apply (/private/var/folders/pz/jpnd1_655wn55npy9jlxvt9m0000gn/T/tmp-74802-0iwBuVUajCEB/node_modules/@dataform/core/bundle.js:15:49145)\n    at d.compile (/private/var/folders/pz/jpnd1_655wn55npy9jlxvt9m0000gn/T/tmp-74802-0iwBuVUajCEB/node_modules/@dataform/core/bundle.js:15:45250)\n    at /private/var/folders/pz/jpnd1_655wn55npy9jlxvt9m0000gn/T/tmp-74802-0iwBuVUajCEB/node_modules/@dataform/core/bundle.js:15:82936\n    at Array.forEach (<anonymous>)\n    at t.Session.compileGraphChunk (/private/var/folders/pz/jpnd1_655wn55npy9jlxvt9m0000gn/T/tmp-74802-0iwBuVUajCEB/node_modules/@dataform/core/bundle.js:15:82909)"
+            },
+            {
+                "fileName": "definitions/silver/markeplace1/01_refresh_marketplace1_product_listing_current.sqlx",
+                "message": "Could not resolve \"marketplace1_product_listing\"",
+                "stack": "Error: Could not resolve \"marketplace1_product_listing\"\n    at t.Session.resolve (/private/var/folders/pz/jpnd1_655wn55npy9jlxvt9m0000gn/T/tmp-74802-0iwBuVUajCEB/node_modules/@dataform/core/bundle.js:15:78859)\n    at f.resolve (/private/var/folders/pz/jpnd1_655wn55npy9jlxvt9m0000gn/T/tmp-74802-0iwBuVUajCEB/node_modules/@dataform/core/bundle.js:15:26175)\n    at f.ref (/private/var/folders/pz/jpnd1_655wn55npy9jlxvt9m0000gn/T/tmp-74802-0iwBuVUajCEB/node_modules/@dataform/core/bundle.js:15:26019)\n    at Object.sqlContextable (/private/var/folders/pz/jpnd1_655wn55npy9jlxvt9m0000gn/T/tmp-74802-0iwBuVUajCEB/definitions/silver/markeplace1/01_refresh_marketplace1_product_listing_current.sqlx:64:8)\n    at /private/var/folders/pz/jpnd1_655wn55npy9jlxvt9m0000gn/T/tmp-74802-0iwBuVUajCEB/node_modules/@dataform/core/bundle.js:15:76765\n    at f.apply (/private/var/folders/pz/jpnd1_655wn55npy9jlxvt9m0000gn/T/tmp-74802-0iwBuVUajCEB/node_modules/@dataform/core/bundle.js:15:26989)\n    at d.compile (/private/var/folders/pz/jpnd1_655wn55npy9jlxvt9m0000gn/T/tmp-74802-0iwBuVUajCEB/node_modules/@dataform/core/bundle.js:15:22474)\n    at /private/var/folders/pz/jpnd1_655wn55npy9jlxvt9m0000gn/T/tmp-74802-0iwBuVUajCEB/node_modules/@dataform/core/bundle.js:15:82936\n    at Array.forEach (<anonymous>)\n    at t.Session.compileGraphChunk (/private/var/folders/pz/jpnd1_655wn55npy9jlxvt9m0000gn/T/tmp-74802-0iwBuVUajCEB/node_modules/@dataform/core/bundle.js:15:82909)"
+            },
+            {
+                "fileName": "definitions/silver/markeplace1/01_refresh_marketplace1_product_listing_current.sqlx",
+                "message": "Could not resolve \"marketplace1_product_listing\"",
+                "stack": "Error: Could not resolve \"marketplace1_product_listing\"\n    at t.Session.resolve (/private/var/folders/pz/jpnd1_655wn55npy9jlxvt9m0000gn/T/tmp-74802-0iwBuVUajCEB/node_modules/@dataform/core/bundle.js:15:78859)\n    at f.resolve (/private/var/folders/pz/jpnd1_655wn55npy9jlxvt9m0000gn/T/tmp-74802-0iwBuVUajCEB/node_modules/@dataform/core/bundle.js:15:26175)\n    at f.ref (/private/var/folders/pz/jpnd1_655wn55npy9jlxvt9m0000gn/T/tmp-74802-0iwBuVUajCEB/node_modules/@dataform/core/bundle.js:15:26019)\n    at Object.sqlContextable (/private/var/folders/pz/jpnd1_655wn55npy9jlxvt9m0000gn/T/tmp-74802-0iwBuVUajCEB/definitions/silver/markeplace1/01_refresh_marketplace1_product_listing_current.sqlx:64:8)\n    at /private/var/folders/pz/jpnd1_655wn55npy9jlxvt9m0000gn/T/tmp-74802-0iwBuVUajCEB/node_modules/@dataform/core/bundle.js:15:76765\n    at f.apply (/private/var/folders/pz/jpnd1_655wn55npy9jlxvt9m0000gn/T/tmp-74802-0iwBuVUajCEB/node_modules/@dataform/core/bundle.js:15:26989)\n    at d.compile (/private/var/folders/pz/jpnd1_655wn55npy9jlxvt9m0000gn/T/tmp-74802-0iwBuVUajCEB/node_modules/@dataform/core/bundle.js:15:22533)\n    at /private/var/folders/pz/jpnd1_655wn55npy9jlxvt9m0000gn/T/tmp-74802-0iwBuVUajCEB/node_modules/@dataform/core/bundle.js:15:82936\n    at Array.forEach (<anonymous>)\n    at t.Session.compileGraphChunk (/private/var/folders/pz/jpnd1_655wn55npy9jlxvt9m0000gn/T/tmp-74802-0iwBuVUajCEB/node_modules/@dataform/core/bundle.js:15:82909)"
+            },
+            {
+                "fileName": "definitions/silver/marketplace2/00_bootstrap_marketplace2_coffee_machines_current.sqlx",
+                "message": "Could not resolve \"otto_product_listing\"",
+                "stack": "Error: Could not resolve \"otto_product_listing\"\n    at t.Session.resolve (/private/var/folders/pz/jpnd1_655wn55npy9jlxvt9m0000gn/T/tmp-74802-0iwBuVUajCEB/node_modules/@dataform/core/bundle.js:15:78859)\n    at f.resolve (/private/var/folders/pz/jpnd1_655wn55npy9jlxvt9m0000gn/T/tmp-74802-0iwBuVUajCEB/node_modules/@dataform/core/bundle.js:15:48426)\n    at f.ref (/private/var/folders/pz/jpnd1_655wn55npy9jlxvt9m0000gn/T/tmp-74802-0iwBuVUajCEB/node_modules/@dataform/core/bundle.js:15:48292)\n    at Object.sqlContextable (/private/var/folders/pz/jpnd1_655wn55npy9jlxvt9m0000gn/T/tmp-74802-0iwBuVUajCEB/definitions/silver/marketplace2/00_bootstrap_marketplace2_coffee_machines_current.sqlx:55:10)\n    at /private/var/folders/pz/jpnd1_655wn55npy9jlxvt9m0000gn/T/tmp-74802-0iwBuVUajCEB/node_modules/@dataform/core/bundle.js:15:77111\n    at f.apply (/private/var/folders/pz/jpnd1_655wn55npy9jlxvt9m0000gn/T/tmp-74802-0iwBuVUajCEB/node_modules/@dataform/core/bundle.js:15:49145)\n    at d.compile (/private/var/folders/pz/jpnd1_655wn55npy9jlxvt9m0000gn/T/tmp-74802-0iwBuVUajCEB/node_modules/@dataform/core/bundle.js:15:45250)\n    at /private/var/folders/pz/jpnd1_655wn55npy9jlxvt9m0000gn/T/tmp-74802-0iwBuVUajCEB/node_modules/@dataform/core/bundle.js:15:82936\n    at Array.forEach (<anonymous>)\n    at t.Session.compileGraphChunk (/private/var/folders/pz/jpnd1_655wn55npy9jlxvt9m0000gn/T/tmp-74802-0iwBuVUajCEB/node_modules/@dataform/core/bundle.js:15:82909)"
+            },
+            {
+                "fileName": "definitions/silver/marketplace2/00_bootstrap_marketplace2_coffee_machines_current.sqlx",
+                "message": "Could not resolve \"otto_product_listing\"",
+                "stack": "Error: Could not resolve \"otto_product_listing\"\n    at t.Session.resolve (/private/var/folders/pz/jpnd1_655wn55npy9jlxvt9m0000gn/T/tmp-74802-0iwBuVUajCEB/node_modules/@dataform/core/bundle.js:15:78859)\n    at f.resolve (/private/var/folders/pz/jpnd1_655wn55npy9jlxvt9m0000gn/T/tmp-74802-0iwBuVUajCEB/node_modules/@dataform/core/bundle.js:15:48426)\n    at f.ref (/private/var/folders/pz/jpnd1_655wn55npy9jlxvt9m0000gn/T/tmp-74802-0iwBuVUajCEB/node_modules/@dataform/core/bundle.js:15:48292)\n    at Object.sqlContextable (/private/var/folders/pz/jpnd1_655wn55npy9jlxvt9m0000gn/T/tmp-74802-0iwBuVUajCEB/definitions/silver/marketplace2/00_bootstrap_marketplace2_coffee_machines_current.sqlx:94:10)\n    at /private/var/folders/pz/jpnd1_655wn55npy9jlxvt9m0000gn/T/tmp-74802-0iwBuVUajCEB/node_modules/@dataform/core/bundle.js:15:77111\n    at f.apply (/private/var/folders/pz/jpnd1_655wn55npy9jlxvt9m0000gn/T/tmp-74802-0iwBuVUajCEB/node_modules/@dataform/core/bundle.js:15:49145)\n    at d.compile (/private/var/folders/pz/jpnd1_655wn55npy9jlxvt9m0000gn/T/tmp-74802-0iwBuVUajCEB/node_modules/@dataform/core/bundle.js:15:45250)\n    at /private/var/folders/pz/jpnd1_655wn55npy9jlxvt9m0000gn/T/tmp-74802-0iwBuVUajCEB/node_modules/@dataform/core/bundle.js:15:82936\n    at Array.forEach (<anonymous>)\n    at t.Session.compileGraphChunk (/private/var/folders/pz/jpnd1_655wn55npy9jlxvt9m0000gn/T/tmp-74802-0iwBuVUajCEB/node_modules/@dataform/core/bundle.js:15:82909)"
+            },
+            {
+                "fileName": "definitions/silver/marketplace2/01_refresh_marketplace2_coffee_machines_current.sqlx",
+                "message": "Could not resolve \"otto_product_listing\"",
+                "stack": "Error: Could not resolve \"otto_product_listing\"\n    at t.Session.resolve (/private/var/folders/pz/jpnd1_655wn55npy9jlxvt9m0000gn/T/tmp-74802-0iwBuVUajCEB/node_modules/@dataform/core/bundle.js:15:78859)\n    at f.resolve (/private/var/folders/pz/jpnd1_655wn55npy9jlxvt9m0000gn/T/tmp-74802-0iwBuVUajCEB/node_modules/@dataform/core/bundle.js:15:26175)\n    at f.ref (/private/var/folders/pz/jpnd1_655wn55npy9jlxvt9m0000gn/T/tmp-74802-0iwBuVUajCEB/node_modules/@dataform/core/bundle.js:15:26019)\n    at Object.sqlContextable (/private/var/folders/pz/jpnd1_655wn55npy9jlxvt9m0000gn/T/tmp-74802-0iwBuVUajCEB/definitions/silver/marketplace2/01_refresh_marketplace2_coffee_machines_current.sqlx:52:8)\n    at /private/var/folders/pz/jpnd1_655wn55npy9jlxvt9m0000gn/T/tmp-74802-0iwBuVUajCEB/node_modules/@dataform/core/bundle.js:15:76765\n    at f.apply (/private/var/folders/pz/jpnd1_655wn55npy9jlxvt9m0000gn/T/tmp-74802-0iwBuVUajCEB/node_modules/@dataform/core/bundle.js:15:26989)\n    at d.compile (/private/var/folders/pz/jpnd1_655wn55npy9jlxvt9m0000gn/T/tmp-74802-0iwBuVUajCEB/node_modules/@dataform/core/bundle.js:15:22474)\n    at /private/var/folders/pz/jpnd1_655wn55npy9jlxvt9m0000gn/T/tmp-74802-0iwBuVUajCEB/node_modules/@dataform/core/bundle.js:15:82936\n    at Array.forEach (<anonymous>)\n    at t.Session.compileGraphChunk (/private/var/folders/pz/jpnd1_655wn55npy9jlxvt9m0000gn/T/tmp-74802-0iwBuVUajCEB/node_modules/@dataform/core/bundle.js:15:82909)"
+            },
+            {
+                "fileName": "definitions/silver/marketplace2/01_refresh_marketplace2_coffee_machines_current.sqlx",
+                "message": "Could not resolve \"otto_product_listing\"",
+                "stack": "Error: Could not resolve \"otto_product_listing\"\n    at t.Session.resolve (/private/var/folders/pz/jpnd1_655wn55npy9jlxvt9m0000gn/T/tmp-74802-0iwBuVUajCEB/node_modules/@dataform/core/bundle.js:15:78859)\n    at f.resolve (/private/var/folders/pz/jpnd1_655wn55npy9jlxvt9m0000gn/T/tmp-74802-0iwBuVUajCEB/node_modules/@dataform/core/bundle.js:15:26175)\n    at f.ref (/private/var/folders/pz/jpnd1_655wn55npy9jlxvt9m0000gn/T/tmp-74802-0iwBuVUajCEB/node_modules/@dataform/core/bundle.js:15:26019)\n    at Object.sqlContextable (/private/var/folders/pz/jpnd1_655wn55npy9jlxvt9m0000gn/T/tmp-74802-0iwBuVUajCEB/definitions/silver/marketplace2/01_refresh_marketplace2_coffee_machines_current.sqlx:52:8)\n    at /private/var/folders/pz/jpnd1_655wn55npy9jlxvt9m0000gn/T/tmp-74802-0iwBuVUajCEB/node_modules/@dataform/core/bundle.js:15:76765\n    at f.apply (/private/var/folders/pz/jpnd1_655wn55npy9jlxvt9m0000gn/T/tmp-74802-0iwBuVUajCEB/node_modules/@dataform/core/bundle.js:15:26989)\n    at d.compile (/private/var/folders/pz/jpnd1_655wn55npy9jlxvt9m0000gn/T/tmp-74802-0iwBuVUajCEB/node_modules/@dataform/core/bundle.js:15:22533)\n    at /private/var/folders/pz/jpnd1_655wn55npy9jlxvt9m0000gn/T/tmp-74802-0iwBuVUajCEB/node_modules/@dataform/core/bundle.js:15:82936\n    at Array.forEach (<anonymous>)\n    at t.Session.compileGraphChunk (/private/var/folders/pz/jpnd1_655wn55npy9jlxvt9m0000gn/T/tmp-74802-0iwBuVUajCEB/node_modules/@dataform/core/bundle.js:15:82909)"
+            },
+            {
+                "fileName": "definitions/silver_stg/00_marketplace1_product_details_flat.sqlx",
+                "message": "Could not resolve \"marketplace1_product_details\"",
+                "stack": "Error: Could not resolve \"marketplace1_product_details\"\n    at t.Session.resolve (/private/var/folders/pz/jpnd1_655wn55npy9jlxvt9m0000gn/T/tmp-74802-0iwBuVUajCEB/node_modules/@dataform/core/bundle.js:15:78859)\n    at f.resolve (/private/var/folders/pz/jpnd1_655wn55npy9jlxvt9m0000gn/T/tmp-74802-0iwBuVUajCEB/node_modules/@dataform/core/bundle.js:15:48426)\n    at f.ref (/private/var/folders/pz/jpnd1_655wn55npy9jlxvt9m0000gn/T/tmp-74802-0iwBuVUajCEB/node_modules/@dataform/core/bundle.js:15:48292)\n    at Object.sqlContextable (/private/var/folders/pz/jpnd1_655wn55npy9jlxvt9m0000gn/T/tmp-74802-0iwBuVUajCEB/definitions/silver_stg/00_marketplace1_product_details_flat.sqlx:116:8)\n    at /private/var/folders/pz/jpnd1_655wn55npy9jlxvt9m0000gn/T/tmp-74802-0iwBuVUajCEB/node_modules/@dataform/core/bundle.js:15:77111\n    at f.apply (/private/var/folders/pz/jpnd1_655wn55npy9jlxvt9m0000gn/T/tmp-74802-0iwBuVUajCEB/node_modules/@dataform/core/bundle.js:15:49145)\n    at d.compile (/private/var/folders/pz/jpnd1_655wn55npy9jlxvt9m0000gn/T/tmp-74802-0iwBuVUajCEB/node_modules/@dataform/core/bundle.js:15:45250)\n    at /private/var/folders/pz/jpnd1_655wn55npy9jlxvt9m0000gn/T/tmp-74802-0iwBuVUajCEB/node_modules/@dataform/core/bundle.js:15:82936\n    at Array.forEach (<anonymous>)\n    at t.Session.compileGraphChunk (/private/var/folders/pz/jpnd1_655wn55npy9jlxvt9m0000gn/T/tmp-74802-0iwBuVUajCEB/node_modules/@dataform/core/bundle.js:15:82909)"
+            },
+            {
+                "fileName": "definitions/silver_stg/01_marketplace1_price_listing_flat.sqlx",
+                "message": "Could not resolve \"marketplace1_price_listing\"",
+                "stack": "Error: Could not resolve \"marketplace1_price_listing\"\n    at t.Session.resolve (/private/var/folders/pz/jpnd1_655wn55npy9jlxvt9m0000gn/T/tmp-74802-0iwBuVUajCEB/node_modules/@dataform/core/bundle.js:15:78859)\n    at f.resolve (/private/var/folders/pz/jpnd1_655wn55npy9jlxvt9m0000gn/T/tmp-74802-0iwBuVUajCEB/node_modules/@dataform/core/bundle.js:15:48426)\n    at f.ref (/private/var/folders/pz/jpnd1_655wn55npy9jlxvt9m0000gn/T/tmp-74802-0iwBuVUajCEB/node_modules/@dataform/core/bundle.js:15:48292)\n    at Object.sqlContextable (/private/var/folders/pz/jpnd1_655wn55npy9jlxvt9m0000gn/T/tmp-74802-0iwBuVUajCEB/definitions/silver_stg/01_marketplace1_price_listing_flat.sqlx:61:8)\n    at /private/var/folders/pz/jpnd1_655wn55npy9jlxvt9m0000gn/T/tmp-74802-0iwBuVUajCEB/node_modules/@dataform/core/bundle.js:15:77111\n    at f.apply (/private/var/folders/pz/jpnd1_655wn55npy9jlxvt9m0000gn/T/tmp-74802-0iwBuVUajCEB/node_modules/@dataform/core/bundle.js:15:49145)\n    at d.compile (/private/var/folders/pz/jpnd1_655wn55npy9jlxvt9m0000gn/T/tmp-74802-0iwBuVUajCEB/node_modules/@dataform/core/bundle.js:15:45250)\n    at /private/var/folders/pz/jpnd1_655wn55npy9jlxvt9m0000gn/T/tmp-74802-0iwBuVUajCEB/node_modules/@dataform/core/bundle.js:15:82936\n    at Array.forEach (<anonymous>)\n    at t.Session.compileGraphChunk (/private/var/folders/pz/jpnd1_655wn55npy9jlxvt9m0000gn/T/tmp-74802-0iwBuVUajCEB/node_modules/@dataform/core/bundle.js:15:82909)"
+            },
+            {
+                "fileName": "definitions/silver/markeplace1/00_bootstrap_marketplace1_product_listing_current.sqlx",
+                "message": "Missing dependency detected: Action \"etrendo-prd.dataform.00_bootstrap_marketplace1_product_listing_current\" depends on \"{\"name\":\"marketplace1_product_listing\",\"includeDependentAssertions\":false}\" which does not exist",
+                "stack": "Error: Missing dependency detected: Action \"etrendo-prd.dataform.00_bootstrap_marketplace1_product_listing_current\" depends on \"{\"name\":\"marketplace1_product_listing\",\"includeDependentAssertions\":false}\" which does not exist\n    at /private/var/folders/pz/jpnd1_655wn55npy9jlxvt9m0000gn/T/tmp-74802-0iwBuVUajCEB/node_modules/@dataform/core/bundle.js:15:83318\n    at Array.forEach (<anonymous>)\n    at t.Session.fullyQualifyDependencies (/private/var/folders/pz/jpnd1_655wn55npy9jlxvt9m0000gn/T/tmp-74802-0iwBuVUajCEB/node_modules/@dataform/core/bundle.js:15:83124)\n    at t.Session.compile (/private/var/folders/pz/jpnd1_655wn55npy9jlxvt9m0000gn/T/tmp-74802-0iwBuVUajCEB/node_modules/@dataform/core/bundle.js:15:81688)\n    at t.main (/private/var/folders/pz/jpnd1_655wn55npy9jlxvt9m0000gn/T/tmp-74802-0iwBuVUajCEB/node_modules/@dataform/core/bundle.js:15:72984)\n    at /private/var/folders/pz/jpnd1_655wn55npy9jlxvt9m0000gn/T/tmp-74802-0iwBuVUajCEB/index.js:1:96\n    at VM2 Wrapper.apply (/opt/homebrew/lib/node_modules/@dataform/cli/node_modules/vm2/lib/bridge.js:485:11)\n    at NodeVM.run (/opt/homebrew/lib/node_modules/@dataform/cli/node_modules/vm2/lib/nodevm.js:497:23)\n    at compile (/opt/homebrew/lib/node_modules/@dataform/cli/worker_bundle.js:24816:23)\n    at process.<anonymous> (/opt/homebrew/lib/node_modules/@dataform/cli/worker_bundle.js:24821:36)",
+                "actionName": "etrendo-prd.dataform.00_bootstrap_marketplace1_product_listing_current",
+                "actionTarget": {
+                    "schema": "dataform",
+                    "name": "00_bootstrap_marketplace1_product_listing_current",
+                    "database": "etrendo-prd"
+                }
+            },
+            {
+                "fileName": "definitions/silver/markeplace1/00_bootstrap_marketplace1_product_listing_current.sqlx",
+                "message": "Missing dependency detected: Action \"etrendo-prd.dataform.00_bootstrap_marketplace1_product_listing_current\" depends on \"{\"name\":\"marketplace1_product_listing\",\"includeDependentAssertions\":false}\" which does not exist",
+                "stack": "Error: Missing dependency detected: Action \"etrendo-prd.dataform.00_bootstrap_marketplace1_product_listing_current\" depends on \"{\"name\":\"marketplace1_product_listing\",\"includeDependentAssertions\":false}\" which does not exist\n    at /private/var/folders/pz/jpnd1_655wn55npy9jlxvt9m0000gn/T/tmp-74802-0iwBuVUajCEB/node_modules/@dataform/core/bundle.js:15:83318\n    at Array.forEach (<anonymous>)\n    at t.Session.fullyQualifyDependencies (/private/var/folders/pz/jpnd1_655wn55npy9jlxvt9m0000gn/T/tmp-74802-0iwBuVUajCEB/node_modules/@dataform/core/bundle.js:15:83124)\n    at t.Session.compile (/private/var/folders/pz/jpnd1_655wn55npy9jlxvt9m0000gn/T/tmp-74802-0iwBuVUajCEB/node_modules/@dataform/core/bundle.js:15:81688)\n    at t.main (/private/var/folders/pz/jpnd1_655wn55npy9jlxvt9m0000gn/T/tmp-74802-0iwBuVUajCEB/node_modules/@dataform/core/bundle.js:15:72984)\n    at /private/var/folders/pz/jpnd1_655wn55npy9jlxvt9m0000gn/T/tmp-74802-0iwBuVUajCEB/index.js:1:96\n    at VM2 Wrapper.apply (/opt/homebrew/lib/node_modules/@dataform/cli/node_modules/vm2/lib/bridge.js:485:11)\n    at NodeVM.run (/opt/homebrew/lib/node_modules/@dataform/cli/node_modules/vm2/lib/nodevm.js:497:23)\n    at compile (/opt/homebrew/lib/node_modules/@dataform/cli/worker_bundle.js:24816:23)\n    at process.<anonymous> (/opt/homebrew/lib/node_modules/@dataform/cli/worker_bundle.js:24821:36)",
+                "actionName": "etrendo-prd.dataform.00_bootstrap_marketplace1_product_listing_current",
+                "actionTarget": {
+                    "schema": "dataform",
+                    "name": "00_bootstrap_marketplace1_product_listing_current",
+                    "database": "etrendo-prd"
+                }
+            },
+            {
+                "fileName": "definitions/silver/markeplace1/01_refresh_marketplace1_product_listing_current.sqlx",
+                "message": "Missing dependency detected: Action \"etrendo-prd.dataform.01_refresh_marketplace1_product_listing_current\" depends on \"{\"name\":\"marketplace1_product_listing\",\"includeDependentAssertions\":false}\" which does not exist",
+                "stack": "Error: Missing dependency detected: Action \"etrendo-prd.dataform.01_refresh_marketplace1_product_listing_current\" depends on \"{\"name\":\"marketplace1_product_listing\",\"includeDependentAssertions\":false}\" which does not exist\n    at /private/var/folders/pz/jpnd1_655wn55npy9jlxvt9m0000gn/T/tmp-74802-0iwBuVUajCEB/node_modules/@dataform/core/bundle.js:15:83318\n    at Array.forEach (<anonymous>)\n    at t.Session.fullyQualifyDependencies (/private/var/folders/pz/jpnd1_655wn55npy9jlxvt9m0000gn/T/tmp-74802-0iwBuVUajCEB/node_modules/@dataform/core/bundle.js:15:83124)\n    at t.Session.compile (/private/var/folders/pz/jpnd1_655wn55npy9jlxvt9m0000gn/T/tmp-74802-0iwBuVUajCEB/node_modules/@dataform/core/bundle.js:15:81688)\n    at t.main (/private/var/folders/pz/jpnd1_655wn55npy9jlxvt9m0000gn/T/tmp-74802-0iwBuVUajCEB/node_modules/@dataform/core/bundle.js:15:72984)\n    at /private/var/folders/pz/jpnd1_655wn55npy9jlxvt9m0000gn/T/tmp-74802-0iwBuVUajCEB/index.js:1:96\n    at VM2 Wrapper.apply (/opt/homebrew/lib/node_modules/@dataform/cli/node_modules/vm2/lib/bridge.js:485:11)\n    at NodeVM.run (/opt/homebrew/lib/node_modules/@dataform/cli/node_modules/vm2/lib/nodevm.js:497:23)\n    at compile (/opt/homebrew/lib/node_modules/@dataform/cli/worker_bundle.js:24816:23)\n    at process.<anonymous> (/opt/homebrew/lib/node_modules/@dataform/cli/worker_bundle.js:24821:36)",
+                "actionName": "etrendo-prd.dataform.01_refresh_marketplace1_product_listing_current",
+                "actionTarget": {
+                    "schema": "dataform",
+                    "name": "01_refresh_marketplace1_product_listing_current",
+                    "database": "etrendo-prd"
+                }
+            },
+            {
+                "fileName": "definitions/silver/markeplace1/01_refresh_marketplace1_product_listing_current.sqlx",
+                "message": "Missing dependency detected: Action \"etrendo-prd.dataform.01_refresh_marketplace1_product_listing_current\" depends on \"{\"name\":\"marketplace1_product_listing\",\"includeDependentAssertions\":false}\" which does not exist",
+                "stack": "Error: Missing dependency detected: Action \"etrendo-prd.dataform.01_refresh_marketplace1_product_listing_current\" depends on \"{\"name\":\"marketplace1_product_listing\",\"includeDependentAssertions\":false}\" which does not exist\n    at /private/var/folders/pz/jpnd1_655wn55npy9jlxvt9m0000gn/T/tmp-74802-0iwBuVUajCEB/node_modules/@dataform/core/bundle.js:15:83318\n    at Array.forEach (<anonymous>)\n    at t.Session.fullyQualifyDependencies (/private/var/folders/pz/jpnd1_655wn55npy9jlxvt9m0000gn/T/tmp-74802-0iwBuVUajCEB/node_modules/@dataform/core/bundle.js:15:83124)\n    at t.Session.compile (/private/var/folders/pz/jpnd1_655wn55npy9jlxvt9m0000gn/T/tmp-74802-0iwBuVUajCEB/node_modules/@dataform/core/bundle.js:15:81688)\n    at t.main (/private/var/folders/pz/jpnd1_655wn55npy9jlxvt9m0000gn/T/tmp-74802-0iwBuVUajCEB/node_modules/@dataform/core/bundle.js:15:72984)\n    at /private/var/folders/pz/jpnd1_655wn55npy9jlxvt9m0000gn/T/tmp-74802-0iwBuVUajCEB/index.js:1:96\n    at VM2 Wrapper.apply (/opt/homebrew/lib/node_modules/@dataform/cli/node_modules/vm2/lib/bridge.js:485:11)\n    at NodeVM.run (/opt/homebrew/lib/node_modules/@dataform/cli/node_modules/vm2/lib/nodevm.js:497:23)\n    at compile (/opt/homebrew/lib/node_modules/@dataform/cli/worker_bundle.js:24816:23)\n    at process.<anonymous> (/opt/homebrew/lib/node_modules/@dataform/cli/worker_bundle.js:24821:36)",
+                "actionName": "etrendo-prd.dataform.01_refresh_marketplace1_product_listing_current",
+                "actionTarget": {
+                    "schema": "dataform",
+                    "name": "01_refresh_marketplace1_product_listing_current",
+                    "database": "etrendo-prd"
+                }
+            },
+            {
+                "fileName": "definitions/silver/marketplace2/00_bootstrap_marketplace2_coffee_machines_current.sqlx",
+                "message": "Missing dependency detected: Action \"etrendo-prd.dataform.00_bootstrap_marketplace2_coffee_machines_current\" depends on \"{\"name\":\"otto_product_listing\",\"includeDependentAssertions\":false}\" which does not exist",
+                "stack": "Error: Missing dependency detected: Action \"etrendo-prd.dataform.00_bootstrap_marketplace2_coffee_machines_current\" depends on \"{\"name\":\"otto_product_listing\",\"includeDependentAssertions\":false}\" which does not exist\n    at /private/var/folders/pz/jpnd1_655wn55npy9jlxvt9m0000gn/T/tmp-74802-0iwBuVUajCEB/node_modules/@dataform/core/bundle.js:15:83318\n    at Array.forEach (<anonymous>)\n    at t.Session.fullyQualifyDependencies (/private/var/folders/pz/jpnd1_655wn55npy9jlxvt9m0000gn/T/tmp-74802-0iwBuVUajCEB/node_modules/@dataform/core/bundle.js:15:83124)\n    at t.Session.compile (/private/var/folders/pz/jpnd1_655wn55npy9jlxvt9m0000gn/T/tmp-74802-0iwBuVUajCEB/node_modules/@dataform/core/bundle.js:15:81688)\n    at t.main (/private/var/folders/pz/jpnd1_655wn55npy9jlxvt9m0000gn/T/tmp-74802-0iwBuVUajCEB/node_modules/@dataform/core/bundle.js:15:72984)\n    at /private/var/folders/pz/jpnd1_655wn55npy9jlxvt9m0000gn/T/tmp-74802-0iwBuVUajCEB/index.js:1:96\n    at VM2 Wrapper.apply (/opt/homebrew/lib/node_modules/@dataform/cli/node_modules/vm2/lib/bridge.js:485:11)\n    at NodeVM.run (/opt/homebrew/lib/node_modules/@dataform/cli/node_modules/vm2/lib/nodevm.js:497:23)\n    at compile (/opt/homebrew/lib/node_modules/@dataform/cli/worker_bundle.js:24816:23)\n    at process.<anonymous> (/opt/homebrew/lib/node_modules/@dataform/cli/worker_bundle.js:24821:36)",
+                "actionName": "etrendo-prd.dataform.00_bootstrap_marketplace2_coffee_machines_current",
+                "actionTarget": {
+                    "schema": "dataform",
+                    "name": "00_bootstrap_marketplace2_coffee_machines_current",
+                    "database": "etrendo-prd"
+                }
+            },
+            {
+                "fileName": "definitions/silver/marketplace2/00_bootstrap_marketplace2_coffee_machines_current.sqlx",
+                "message": "Missing dependency detected: Action \"etrendo-prd.dataform.00_bootstrap_marketplace2_coffee_machines_current\" depends on \"{\"name\":\"otto_product_listing\",\"includeDependentAssertions\":false}\" which does not exist",
+                "stack": "Error: Missing dependency detected: Action \"etrendo-prd.dataform.00_bootstrap_marketplace2_coffee_machines_current\" depends on \"{\"name\":\"otto_product_listing\",\"includeDependentAssertions\":false}\" which does not exist\n    at /private/var/folders/pz/jpnd1_655wn55npy9jlxvt9m0000gn/T/tmp-74802-0iwBuVUajCEB/node_modules/@dataform/core/bundle.js:15:83318\n    at Array.forEach (<anonymous>)\n    at t.Session.fullyQualifyDependencies (/private/var/folders/pz/jpnd1_655wn55npy9jlxvt9m0000gn/T/tmp-74802-0iwBuVUajCEB/node_modules/@dataform/core/bundle.js:15:83124)\n    at t.Session.compile (/private/var/folders/pz/jpnd1_655wn55npy9jlxvt9m0000gn/T/tmp-74802-0iwBuVUajCEB/node_modules/@dataform/core/bundle.js:15:81688)\n    at t.main (/private/var/folders/pz/jpnd1_655wn55npy9jlxvt9m0000gn/T/tmp-74802-0iwBuVUajCEB/node_modules/@dataform/core/bundle.js:15:72984)\n    at /private/var/folders/pz/jpnd1_655wn55npy9jlxvt9m0000gn/T/tmp-74802-0iwBuVUajCEB/index.js:1:96\n    at VM2 Wrapper.apply (/opt/homebrew/lib/node_modules/@dataform/cli/node_modules/vm2/lib/bridge.js:485:11)\n    at NodeVM.run (/opt/homebrew/lib/node_modules/@dataform/cli/node_modules/vm2/lib/nodevm.js:497:23)\n    at compile (/opt/homebrew/lib/node_modules/@dataform/cli/worker_bundle.js:24816:23)\n    at process.<anonymous> (/opt/homebrew/lib/node_modules/@dataform/cli/worker_bundle.js:24821:36)",
+                "actionName": "etrendo-prd.dataform.00_bootstrap_marketplace2_coffee_machines_current",
+                "actionTarget": {
+                    "schema": "dataform",
+                    "name": "00_bootstrap_marketplace2_coffee_machines_current",
+                    "database": "etrendo-prd"
+                }
+            },
+            {
+                "fileName": "definitions/silver/marketplace2/01_refresh_marketplace2_coffee_machines_current.sqlx",
+                "message": "Missing dependency detected: Action \"etrendo-prd.dataform.01_refresh_marketplace2_coffee_machines_current\" depends on \"{\"name\":\"otto_product_listing\",\"includeDependentAssertions\":false}\" which does not exist",
+                "stack": "Error: Missing dependency detected: Action \"etrendo-prd.dataform.01_refresh_marketplace2_coffee_machines_current\" depends on \"{\"name\":\"otto_product_listing\",\"includeDependentAssertions\":false}\" which does not exist\n    at /private/var/folders/pz/jpnd1_655wn55npy9jlxvt9m0000gn/T/tmp-74802-0iwBuVUajCEB/node_modules/@dataform/core/bundle.js:15:83318\n    at Array.forEach (<anonymous>)\n    at t.Session.fullyQualifyDependencies (/private/var/folders/pz/jpnd1_655wn55npy9jlxvt9m0000gn/T/tmp-74802-0iwBuVUajCEB/node_modules/@dataform/core/bundle.js:15:83124)\n    at t.Session.compile (/private/var/folders/pz/jpnd1_655wn55npy9jlxvt9m0000gn/T/tmp-74802-0iwBuVUajCEB/node_modules/@dataform/core/bundle.js:15:81688)\n    at t.main (/private/var/folders/pz/jpnd1_655wn55npy9jlxvt9m0000gn/T/tmp-74802-0iwBuVUajCEB/node_modules/@dataform/core/bundle.js:15:72984)\n    at /private/var/folders/pz/jpnd1_655wn55npy9jlxvt9m0000gn/T/tmp-74802-0iwBuVUajCEB/index.js:1:96\n    at VM2 Wrapper.apply (/opt/homebrew/lib/node_modules/@dataform/cli/node_modules/vm2/lib/bridge.js:485:11)\n    at NodeVM.run (/opt/homebrew/lib/node_modules/@dataform/cli/node_modules/vm2/lib/nodevm.js:497:23)\n    at compile (/opt/homebrew/lib/node_modules/@dataform/cli/worker_bundle.js:24816:23)\n    at process.<anonymous> (/opt/homebrew/lib/node_modules/@dataform/cli/worker_bundle.js:24821:36)",
+                "actionName": "etrendo-prd.dataform.01_refresh_marketplace2_coffee_machines_current",
+                "actionTarget": {
+                    "schema": "dataform",
+                    "name": "01_refresh_marketplace2_coffee_machines_current",
+                    "database": "etrendo-prd"
+                }
+            },
+            {
+                "fileName": "definitions/silver/marketplace2/01_refresh_marketplace2_coffee_machines_current.sqlx",
+                "message": "Missing dependency detected: Action \"etrendo-prd.dataform.01_refresh_marketplace2_coffee_machines_current\" depends on \"{\"name\":\"otto_product_listing\",\"includeDependentAssertions\":false}\" which does not exist",
+                "stack": "Error: Missing dependency detected: Action \"etrendo-prd.dataform.01_refresh_marketplace2_coffee_machines_current\" depends on \"{\"name\":\"otto_product_listing\",\"includeDependentAssertions\":false}\" which does not exist\n    at /private/var/folders/pz/jpnd1_655wn55npy9jlxvt9m0000gn/T/tmp-74802-0iwBuVUajCEB/node_modules/@dataform/core/bundle.js:15:83318\n    at Array.forEach (<anonymous>)\n    at t.Session.fullyQualifyDependencies (/private/var/folders/pz/jpnd1_655wn55npy9jlxvt9m0000gn/T/tmp-74802-0iwBuVUajCEB/node_modules/@dataform/core/bundle.js:15:83124)\n    at t.Session.compile (/private/var/folders/pz/jpnd1_655wn55npy9jlxvt9m0000gn/T/tmp-74802-0iwBuVUajCEB/node_modules/@dataform/core/bundle.js:15:81688)\n    at t.main (/private/var/folders/pz/jpnd1_655wn55npy9jlxvt9m0000gn/T/tmp-74802-0iwBuVUajCEB/node_modules/@dataform/core/bundle.js:15:72984)\n    at /private/var/folders/pz/jpnd1_655wn55npy9jlxvt9m0000gn/T/tmp-74802-0iwBuVUajCEB/index.js:1:96\n    at VM2 Wrapper.apply (/opt/homebrew/lib/node_modules/@dataform/cli/node_modules/vm2/lib/bridge.js:485:11)\n    at NodeVM.run (/opt/homebrew/lib/node_modules/@dataform/cli/node_modules/vm2/lib/nodevm.js:497:23)\n    at compile (/opt/homebrew/lib/node_modules/@dataform/cli/worker_bundle.js:24816:23)\n    at process.<anonymous> (/opt/homebrew/lib/node_modules/@dataform/cli/worker_bundle.js:24821:36)",
+                "actionName": "etrendo-prd.dataform.01_refresh_marketplace2_coffee_machines_current",
+                "actionTarget": {
+                    "schema": "dataform",
+                    "name": "01_refresh_marketplace2_coffee_machines_current",
+                    "database": "etrendo-prd"
+                }
+            },
+            {
+                "fileName": "definitions/silver_stg/00_marketplace1_product_details_flat.sqlx",
+                "message": "Missing dependency detected: Action \"etrendo-prd.dataform.00_marketplace1_product_details_flat\" depends on \"{\"name\":\"marketplace1_product_details\",\"includeDependentAssertions\":false}\" which does not exist",
+                "stack": "Error: Missing dependency detected: Action \"etrendo-prd.dataform.00_marketplace1_product_details_flat\" depends on \"{\"name\":\"marketplace1_product_details\",\"includeDependentAssertions\":false}\" which does not exist\n    at /private/var/folders/pz/jpnd1_655wn55npy9jlxvt9m0000gn/T/tmp-74802-0iwBuVUajCEB/node_modules/@dataform/core/bundle.js:15:83318\n    at Array.forEach (<anonymous>)\n    at t.Session.fullyQualifyDependencies (/private/var/folders/pz/jpnd1_655wn55npy9jlxvt9m0000gn/T/tmp-74802-0iwBuVUajCEB/node_modules/@dataform/core/bundle.js:15:83124)\n    at t.Session.compile (/private/var/folders/pz/jpnd1_655wn55npy9jlxvt9m0000gn/T/tmp-74802-0iwBuVUajCEB/node_modules/@dataform/core/bundle.js:15:81688)\n    at t.main (/private/var/folders/pz/jpnd1_655wn55npy9jlxvt9m0000gn/T/tmp-74802-0iwBuVUajCEB/node_modules/@dataform/core/bundle.js:15:72984)\n    at /private/var/folders/pz/jpnd1_655wn55npy9jlxvt9m0000gn/T/tmp-74802-0iwBuVUajCEB/index.js:1:96\n    at VM2 Wrapper.apply (/opt/homebrew/lib/node_modules/@dataform/cli/node_modules/vm2/lib/bridge.js:485:11)\n    at NodeVM.run (/opt/homebrew/lib/node_modules/@dataform/cli/node_modules/vm2/lib/nodevm.js:497:23)\n    at compile (/opt/homebrew/lib/node_modules/@dataform/cli/worker_bundle.js:24816:23)\n    at process.<anonymous> (/opt/homebrew/lib/node_modules/@dataform/cli/worker_bundle.js:24821:36)",
+                "actionName": "etrendo-prd.dataform.00_marketplace1_product_details_flat",
+                "actionTarget": {
+                    "schema": "dataform",
+                    "name": "00_marketplace1_product_details_flat",
+                    "database": "etrendo-prd"
+                }
+            },
+            {
+                "fileName": "definitions/silver_stg/01_marketplace1_price_listing_flat.sqlx",
+                "message": "Missing dependency detected: Action \"etrendo-prd.dataform.01_marketplace1_price_listing_flat\" depends on \"{\"name\":\"marketplace1_price_listing\",\"includeDependentAssertions\":false}\" which does not exist",
+                "stack": "Error: Missing dependency detected: Action \"etrendo-prd.dataform.01_marketplace1_price_listing_flat\" depends on \"{\"name\":\"marketplace1_price_listing\",\"includeDependentAssertions\":false}\" which does not exist\n    at /private/var/folders/pz/jpnd1_655wn55npy9jlxvt9m0000gn/T/tmp-74802-0iwBuVUajCEB/node_modules/@dataform/core/bundle.js:15:83318\n    at Array.forEach (<anonymous>)\n    at t.Session.fullyQualifyDependencies (/private/var/folders/pz/jpnd1_655wn55npy9jlxvt9m0000gn/T/tmp-74802-0iwBuVUajCEB/node_modules/@dataform/core/bundle.js:15:83124)\n    at t.Session.compile (/private/var/folders/pz/jpnd1_655wn55npy9jlxvt9m0000gn/T/tmp-74802-0iwBuVUajCEB/node_modules/@dataform/core/bundle.js:15:81688)\n    at t.main (/private/var/folders/pz/jpnd1_655wn55npy9jlxvt9m0000gn/T/tmp-74802-0iwBuVUajCEB/node_modules/@dataform/core/bundle.js:15:72984)\n    at /private/var/folders/pz/jpnd1_655wn55npy9jlxvt9m0000gn/T/tmp-74802-0iwBuVUajCEB/index.js:1:96\n    at VM2 Wrapper.apply (/opt/homebrew/lib/node_modules/@dataform/cli/node_modules/vm2/lib/bridge.js:485:11)\n    at NodeVM.run (/opt/homebrew/lib/node_modules/@dataform/cli/node_modules/vm2/lib/nodevm.js:497:23)\n    at compile (/opt/homebrew/lib/node_modules/@dataform/cli/worker_bundle.js:24816:23)\n    at process.<anonymous> (/opt/homebrew/lib/node_modules/@dataform/cli/worker_bundle.js:24821:36)",
+                "actionName": "etrendo-prd.dataform.01_marketplace1_price_listing_flat",
+                "actionTarget": {
+                    "schema": "dataform",
+                    "name": "01_marketplace1_price_listing_flat",
+                    "database": "etrendo-prd"
+                }
+            }
+        ]
+    },
+    "dataformCoreVersion": "3.0.37",
+    "targets": [
+        {
+            "schema": "dataform",
+            "name": "00_schema_marketplace1_product_details",
+            "database": "etrendo-prd"
+        },
+        {
+            "schema": "dataform",
+            "name": "01_schema_marketplace1_price_listing",
+            "database": "etrendo-prd"
+        },
+        {
+            "schema": "dataform",
+            "name": "00_bootstrap_marketplace1_product_listing_current",
+            "database": "etrendo-prd"
+        },
+        {
+            "schema": "dataform",
+            "name": "01_refresh_marketplace1_product_listing_current",
+            "database": "etrendo-prd"
+        },
+        {
+            "schema": "dataform",
+            "name": "02_set_active_flags_marketplace1_product_listing_current",
+            "database": "etrendo-prd"
+        },
+        {
+            "schema": "dataform",
+            "name": "03_refresh_marketplace1_product_details_current",
+            "database": "etrendo-prd"
+        },
+        {
+            "schema": "dataform",
+            "name": "04_marketplace1_snapshot_category_daily_v0",
+            "database": "etrendo-prd"
+        },
+        {
+            "schema": "dataform",
+            "name": "05_daily_offers_summary_marketplace1_daily_v0",
+            "database": "etrendo-prd"
+        },
+        {
+            "schema": "dataform",
+            "name": "06_daily_snapshot_marketplace1_category_daily_v1",
+            "database": "etrendo-prd"
+        },
+        {
+            "schema": "dataform",
+            "name": "00_bootstrap_marketplace2_coffee_machines_current",
+            "database": "etrendo-prd"
+        },
+        {
+            "schema": "dataform",
+            "name": "01_refresh_marketplace2_coffee_machines_current",
+            "database": "etrendo-prd"
+        },
+        {
+            "schema": "dataform",
+            "name": "02_set_active_flags_marketplace2_product_listing_coffee_machines",
+            "database": "etrendo-prd"
+        },
+        {
+            "schema": "dataform",
+            "name": "00_marketplace1_product_details_flat",
+            "database": "etrendo-prd"
+        },
+        {
+            "schema": "dataform",
+            "name": "01_marketplace1_price_listing_flat",
+            "database": "etrendo-prd"
+        },
+        {
+            "schema": "dataform",
+            "name": "source_declarations",
+            "database": "etrendo-prd"
+        }
+    ]
+}
+
+

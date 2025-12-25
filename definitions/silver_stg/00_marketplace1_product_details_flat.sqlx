@@ -95,6 +95,6 @@ SELECT
   -- =========================
   payload_raw
 
-FROM ${source("marketplace1_product_details")}
+FROM ${ref("amazon_product_details_coffee_machines")}
 WHERE asin IS NOT NULL
   AND TRIM(asin) != ''
