@@ -99,6 +99,9 @@ page_number,
 -- Used to determine "active/inactive"
 extracted_at AS last_seen_at,
 
+-- Start everything as active; operations step updates this flag
+TRUE AS is_active,
+
 -- audit column
 CURRENT_TIMESTAMP() AS silver_updated_at
 
