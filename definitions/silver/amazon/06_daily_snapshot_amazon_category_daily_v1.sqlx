@@ -1,8 +1,9 @@
 config { 
     type: "table",
+    schema: "amazon_silver",
     partitionBy: "snapshot_date",
     clusterBy: ["asin"],
-    tags: ["silver", "marketplace1", "daily_snapshot"]
+    tags: ["silver", "amazon", "daily_snapshot"]
 }
 
 WITH listing_latest AS (
@@ -11,7 +12,7 @@ WITH listing_latest AS (
     SELECT
       l.*,
       ROW_NUMBER() OVER (PARTITION BY asin ORDER BY extracted_at DESC) AS rn
-    FROM ${ref("01_refresh_marketplace1_product_listing_current")} l
+    FROM ${ref("01_refresh_amazon_product_listing_current")} l
     WHERE asin IS NOT NULL AND TRIM(asin) != ''
   )
   WHERE rn = 1
@@ -56,9 +57,9 @@ SELECT
     ELSE 'INCOMPLETE_PDP'
   END AS data_coverage
 
-FROM ${ref("04_marketplace1_snapshot_category_daily_v0")} s
+FROM ${ref("04_amazon_snapshot_category_daily_v0")} s
 LEFT JOIN listing_latest l
   ON l.asin = s.asin
-LEFT JOIN ${ref("05_daily_offers_summary_marketplace1_daily_v0")} o
+LEFT JOIN ${ref("05_daily_offers_summary_amazon_daily_v0")} o
   ON o.asin = s.asin
  AND o.offer_date = s.snapshot_date

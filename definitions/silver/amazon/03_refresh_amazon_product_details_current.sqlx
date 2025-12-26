@@ -1,7 +1,8 @@
 config { 
     type: "table",
+    schema: "amazon_silver",
     clusterBy: ["asin"],
-    tags: ["silver", "marketplace1", "products"]
+    tags: ["silver", "amazon", "products"]
 }
 
 WITH ranked AS (
@@ -11,7 +12,7 @@ WITH ranked AS (
       PARTITION BY asin
       ORDER BY extracted_at DESC
     ) AS rn
-  FROM ${ref("00_marketplace1_product_details_flat")}
+  FROM ${ref("00_amazon_product_details_flat")}
 )
 
 SELECT
