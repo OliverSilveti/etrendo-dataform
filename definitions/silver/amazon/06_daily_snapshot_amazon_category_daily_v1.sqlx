@@ -12,7 +12,7 @@ WITH listing_latest AS (
     SELECT
       l.*,
       ROW_NUMBER() OVER (PARTITION BY asin ORDER BY extracted_at DESC) AS rn
-    FROM ${ref("01_refresh_amazon_product_listing_current")} l
+    FROM ${ref("amazon_coffee_machines_product_listing_current")} l
     WHERE asin IS NOT NULL AND TRIM(asin) != ''
   )
   WHERE rn = 1
