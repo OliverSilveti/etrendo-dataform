@@ -1,5 +1,6 @@
 config { 
     type: "table",
+    schema: "amazon_silver",
     clusterBy: ["category_label", "node", "asin"],
     tags: ["silver", "marketplace1", "products"]
 }

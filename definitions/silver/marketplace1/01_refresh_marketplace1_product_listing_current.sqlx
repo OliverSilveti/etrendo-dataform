@@ -1,5 +1,6 @@
 config { 
     type: "incremental",
+    schema: "amazon_silver",
     uniqueKey: ["category_label", "node", "asin"],
     tags: ["silver", "marketplace1", "products"]
 }

@@ -1,5 +1,6 @@
 config { 
     type: "table",
+    schema: "amazon_silver",
     partitionBy: "offer_date",
     clusterBy: ["asin"],
     tags: ["silver", "marketplace1", "daily_offers"]
