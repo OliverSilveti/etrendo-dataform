@@ -1,6 +1,6 @@
 config {
   type: "operations",
-  tags: ["bronze", "marketplace1"]
+  tags: ["bronze", "amazon"]
 }
 
 CREATE OR REPLACE EXTERNAL TABLE `etrendo-prd.amazon_bronze.amazon_product_details_coffee_machines` (

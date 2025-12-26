@@ -48,4 +48,4 @@ To get this project running in your GCP environment for the MVP, you need to per
 
 ## Testing
 
-You can manually run and test parts of the project directly from the Dataform UI in the Cloud Console. Use the "tags" we've added to the files (e.g., `silver`, `marketplace1`) to select and run only the specific models you want to test.
+You can manually run and test parts of the project directly from the Dataform UI in the Cloud Console. Use the "tags" we've added to the files (e.g., `silver`, `amazon`, `otto`) to select and run only the specific models you want to test.

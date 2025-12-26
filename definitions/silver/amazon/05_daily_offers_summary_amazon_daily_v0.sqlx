@@ -3,7 +3,7 @@ config {
     schema: "amazon_silver",
     partitionBy: "offer_date",
     clusterBy: ["asin"],
-    tags: ["silver", "marketplace1", "daily_offers"]
+    tags: ["silver", "amazon", "daily_offers"]
 }
 
 SELECT
@@ -17,7 +17,7 @@ SELECT
   APPROX_QUANTILES(SAFE_CAST(price AS NUMERIC) + COALESCE(SAFE_CAST(price_shipping AS NUMERIC), 0), 2)[OFFSET(1)] AS median_total_price,
   MAX(SAFE_CAST(price AS NUMERIC) + COALESCE(SAFE_CAST(price_shipping AS NUMERIC), 0)) AS max_total_price
 
-FROM ${ref("01_marketplace1_price_listing_flat")}
+FROM ${ref("01_amazon_price_listing_flat")}
 WHERE asin IS NOT NULL AND TRIM(asin) != ''
   AND SAFE_CAST(price AS NUMERIC) > 0   -- filters junk rows
 GROUP BY offer_date, asin

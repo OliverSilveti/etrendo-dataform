@@ -3,7 +3,7 @@ config {
     schema: "amazon_silver_stg",
     partitionBy: "DATE(extracted_at)",
     clusterBy: ["asin"],
-    tags: ["silver_stg", "marketplace1"]
+    tags: ["silver_stg", "amazon"]
 }
 
 SELECT

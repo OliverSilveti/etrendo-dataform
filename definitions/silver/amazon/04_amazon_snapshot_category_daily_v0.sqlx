@@ -3,7 +3,7 @@ config {
     schema: "amazon_silver",
     partitionBy: "snapshot_date",
     clusterBy: ["asin"],
-    tags: ["silver", "marketplace1", "daily_snapshot"]
+    tags: ["silver", "amazon", "daily_snapshot"]
 }
 
 CREATE OR REPLACE TABLE `etrendo-prd.amazon_silver.amazon_coffee_machines_snapshot_daily_base`
@@ -50,7 +50,7 @@ SELECT
     ELSE 'UNKNOWN'
   END AS pdp_state
 
-FROM ${ref("00_marketplace1_product_details_flat")}
+FROM ${ref("00_amazon_product_details_flat")}
 QUALIFY ROW_NUMBER() OVER (
   PARTITION BY asin, DATE(extracted_at)
   ORDER BY extracted_at DESC

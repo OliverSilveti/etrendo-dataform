@@ -1,7 +1,7 @@
 config { 
     type: "table",
     clusterBy: ["category_label", "product_key"],
-    tags: ["silver", "marketplace2", "products"]
+    tags: ["silver", "otto", "products"]
 }
 
 WITH cleaned AS (
