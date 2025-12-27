@@ -1,12 +1,13 @@
 config { 
     type: "table",
+    name: "amazon_coffee_machines_snapshot_category_daily_v0",
     schema: "amazon_silver",
     partitionBy: "snapshot_date",
     clusterBy: ["asin"],
     tags: ["silver", "amazon", "daily_snapshot"]
 }
 
-CREATE OR REPLACE TABLE `etrendo-prd.amazon_silver.amazon_coffee_machines_snapshot_daily_base`
+CREATE OR REPLACE TABLE `etrendo-prd.amazon_silver.amazon_coffee_machines_snapshot_category_daily_v0`
 PARTITION BY snapshot_date
 CLUSTER BY asin AS
 SELECT
