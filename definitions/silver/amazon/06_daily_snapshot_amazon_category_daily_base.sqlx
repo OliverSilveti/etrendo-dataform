@@ -1,5 +1,6 @@
 config { 
     type: "table",
+    name: "amazon_coffee_machines_snapshot_category_daily",
     schema: "amazon_gold",
     partitionBy: "snapshot_date",
     clusterBy: ["asin"],
@@ -57,9 +58,9 @@ SELECT
     ELSE 'INCOMPLETE_PDP'
   END AS data_coverage
 
-    FROM ${ref("amazon_coffee_machines_snapshot_category_daily_v0")} s
+FROM ${ref("amazon_coffee_machines_snapshot_category_daily_base")} s
 LEFT JOIN listing_latest l
   ON l.asin = s.asin
-LEFT JOIN ${ref("amazon_coffee_machines_offers_summary_daily_v0")} o
+LEFT JOIN ${ref("amazon_coffee_machines_offers_summary_daily")} o
   ON o.asin = s.asin
  AND o.offer_date = s.snapshot_date

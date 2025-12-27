@@ -1,6 +1,6 @@
 config { 
     type: "table",
-    name: "amazon_coffee_machines_offers_summary_daily_v0",
+    name: "amazon_coffee_machines_offers_summary_daily",
     schema: "amazon_silver",
     partitionBy: "offer_date",
     clusterBy: ["asin"],

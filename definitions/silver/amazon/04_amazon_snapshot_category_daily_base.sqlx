@@ -1,6 +1,6 @@
 config { 
     type: "table",
-    name: "amazon_coffee_machines_snapshot_category_daily_v0",
+    name: "amazon_coffee_machines_snapshot_category_daily_base",
     schema: "amazon_silver",
     partitionBy: "snapshot_date",
     clusterBy: ["asin"],
