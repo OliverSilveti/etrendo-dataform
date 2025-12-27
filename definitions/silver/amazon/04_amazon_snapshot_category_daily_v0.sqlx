@@ -21,9 +21,9 @@ SELECT
   currency,
 
   -- PDP truth (clean)
-  price                  AS pdp_price,
-  price_shipping         AS pdp_price_shipping,
-  price + COALESCE(price_shipping, 0) AS pdp_total_price,
+  pdp_price,
+  pdp_price_shipping,
+  pdp_total_price,
 
   -- Buy Box fields (already parsed)
   buybox_seller_id,
@@ -39,12 +39,11 @@ SELECT
   error_message,
 
   -- Key quality label
-  NULL AS pdp_extraction_state,
+  pdp_extraction_state,
 
   -- Simple business-facing state
   CASE
     WHEN pdp_extraction_state = 'COMPLETE' THEN 'BUYABLE'
-    WHEN pdp_extraction_state = 'INCOMPLETE_PRICE_EXTRACTION' THEN 'INCOMPLETE'
     ELSE 'UNKNOWN'
   END AS pdp_state
 

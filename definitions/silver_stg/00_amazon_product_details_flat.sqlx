@@ -51,6 +51,10 @@ SELECT
   SAFE_CAST(price_shipping AS NUMERIC) AS price_shipping,
   SAFE_CAST(price_buybox AS NUMERIC) AS price_buybox,
   SAFE_CAST(price_sns AS NUMERIC) AS price_sns,
+  SAFE_CAST(price AS NUMERIC) AS pdp_price,
+  SAFE_CAST(price_shipping AS NUMERIC) AS pdp_price_shipping,
+  SAFE_CAST(price AS NUMERIC) + COALESCE(SAFE_CAST(price_shipping AS NUMERIC), 0) AS pdp_total_price,
+  CASE WHEN SAFE_CAST(price AS NUMERIC) IS NOT NULL THEN 'COMPLETE' ELSE 'UNKNOWN' END AS pdp_extraction_state,
 
   -- =========================
   -- BUY BOX SELLER (KEY PART)
