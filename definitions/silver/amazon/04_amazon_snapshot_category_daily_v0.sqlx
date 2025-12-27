@@ -21,14 +21,14 @@ SELECT
   currency,
 
   -- PDP truth (clean)
-  price_clean            AS pdp_price,
-  price_shipping_clean   AS pdp_price_shipping,
-  total_price_clean      AS pdp_total_price,
+  price                  AS pdp_price,
+  price_shipping         AS pdp_price_shipping,
+  price + COALESCE(price_shipping, 0) AS pdp_total_price,
 
   -- Buy Box fields (already parsed)
   buybox_seller_id,
   buybox_seller_name,
-  buybox_price_from_json_clean AS buybox_price_from_json,
+  buybox_price_from_json AS buybox_price_from_json,
   buybox_is_amazon,
   buybox_stock,
 
@@ -39,7 +39,7 @@ SELECT
   error_message,
 
   -- Key quality label
-  pdp_extraction_state,
+  NULL AS pdp_extraction_state,
 
   -- Simple business-facing state
   CASE
