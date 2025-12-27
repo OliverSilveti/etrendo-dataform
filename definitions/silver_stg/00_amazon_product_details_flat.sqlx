@@ -1,5 +1,6 @@
 config { 
     type: "table",
+    name: "amazon_coffee_machines_product_details_flat",
     schema: "amazon_silver_stg",
     partitionBy: "DATE(extracted_at)",
     clusterBy: ["asin"],

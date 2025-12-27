@@ -50,7 +50,7 @@ SELECT
     ELSE 'UNKNOWN'
   END AS pdp_state
 
-FROM ${ref("00_amazon_product_details_flat")}
+FROM ${ref("amazon_coffee_machines_product_details_flat")}
 QUALIFY ROW_NUMBER() OVER (
   PARTITION BY asin, DATE(extracted_at)
   ORDER BY extracted_at DESC
