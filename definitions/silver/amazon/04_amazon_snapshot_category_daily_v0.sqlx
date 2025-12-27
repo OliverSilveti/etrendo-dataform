@@ -7,9 +7,6 @@ config {
     tags: ["silver", "amazon", "daily_snapshot"]
 }
 
-CREATE OR REPLACE TABLE `etrendo-prd.amazon_silver.amazon_coffee_machines_snapshot_category_daily_v0`
-PARTITION BY snapshot_date
-CLUSTER BY asin AS
 SELECT
   DATE(extracted_at) AS snapshot_date,
   extracted_at,
